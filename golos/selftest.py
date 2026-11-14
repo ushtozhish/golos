@@ -1,4 +1,4 @@
-"""Самопроверка интерфейса без моделей: python -m golos.selftest (используется в сборке на GitHub)."""
+"""Самопроверка интерфейса без моделей: python -m golos.selftest (запускается при сборке на GitHub)."""
 import os
 import sys
 import tempfile
@@ -14,51 +14,68 @@ from PySide6.QtCore import QSettings
 def main():
     app = QApplication(sys.argv)
     tmp = Path(tempfile.mkdtemp())
+    os.environ["APPDATA"] = str(tmp)
     s = QSettings("GolosApp", "Golos")
     s.setValue("root", str(tmp)); s.setValue("last_project", "")
     from golos.app import MainWindow
     from golos.project import Word, SR, DubPhrase, Variant
-    from golos import bridge, exporter
+    from golos import exporter, voices
     import soundfile as sf
 
     w = MainWindow()
     w.new_project()
     t = np.arange(SR * 8) / SR
-    w.p.set_audio((np.sin(2 * np.pi * 220 * t) * 0.2).astype(np.float32))
+    tone = (np.sin(2 * np.pi * 220 * t) * 0.3 * ((t % 2) < 1.2)).astype(np.float32)
+    w.p.set_audio(tone + np.random.randn(len(t)).astype(np.float32) * 0.001)
     w.set_project(w.p)
-    words = [("Клиент", 0.5, 0.9), ("хочет", 0.95, 1.3), ("Клиент", 2.0, 2.4), ("хочет", 2.45, 2.8),
-             ("видеть", 2.85, 3.3), ("грейд.", 3.35, 3.9), ("GradeStream", 5.0, 5.8), ("бесплатно.", 5.9, 6.8)]
-    w.p.set_words([Word(*x) for x in words])
-    w.wave.view.refresh(); w.trans.rebuild(); w.refresh_dub_view(); w._update_state()
     w.resize(1300, 850); w.show(); app.processEvents()
-    w.wave.view.grab().save(str(tmp / "wave.png"))
-    w.grab().save(str(tmp / "main.png"))
-    w.toggle_words([0, 1], []); w.undo(); w.redo()
-    w.wave.view.sel = (4.0, 4.5); w.cut_selection(); w.undo()
-    ph = w.p.phrases()
-    assert len(ph) == 2, ph
+    # монтаж
+    w.on_seek(3.0); w.split(); assert len(w.p.clips) == 2
+    w.on_seek(5.0); w.split(); assert len(w.p.clips) == 3
+    w.tl.view.selected = {1}; w.delete_sel(); assert len(w.p.clips) == 2, w.p.clips
+    w.undo(); assert len(w.p.clips) == 3
+    w.redo(); assert len(w.p.clips) == 2
+    w.tl.view.range = (0.5, 1.0); w.delete_sel()
+    w.on_seek(0.2); w.trim("start")
+    w.shorten_pauses(); w.undo()
+    w.p.append_audio(tone[:SR]); w.edits_changed()
+    w.tl.view.zoom_all(); app.processEvents()
+    w.grab().save(str(tmp / "edit.png"))
+    # распознанный текст (имитация)
+    words = [("Клиент", 0.3, 0.7), ("хочет", 0.75, 1.1), ("видеть", 1.15, 1.5), ("грейд.", 1.55, 2.0),
+             ("GradeStream", 2.6, 3.3), ("бесплатно.", 3.4, 4.2)]
+    w.p.set_words([Word(*x) for x in words])
+    assert w.p.words_fresh
+    w.text.rebuild(); w.tl.view.update(); app.processEvents()
+    ph = w.p.phrases(); assert len(ph) == 2, ph
     w.copy_request()
     ans = '```json\n{"golos":1,"translations":{"en":[{"id":1,"text":"The client wants to see the grade."},' \
           '{"id":2,"text":"GradeStream is free."}]}}\n```'
+    w.auto_dub.setChecked(False)
     w.apply_translation(ans, quiet=True)
     assert w.p.translations["en"][2] == "GradeStream is free."
+    # голос из «файла»
+    vc = voices.save_voice("Тест", "file", tone[:SR * 6], SR, "тестовый образец")
+    w.reload_voices(); assert w.voice_box.findData(vc.id) >= 0
     w.p.dub["en"] = []
     for x in ph:
         f = w.p.dub_dir("en") / f"p{x.id}.wav"
         sf.write(str(f), (np.random.randn(int(48000 * x.dur)) * 0.05).astype(np.float32), 48000)
-        w.p.dub["en"].append(DubPhrase(id=x.id, text=w.p.translations["en"][x.id],
+        w.p.dub["en"].append(DubPhrase(id=x.id, text=w.p.translations["en"][x.id], voice=w.p.voice,
                                        variants=[Variant(file=f.name, dur=x.dur)], chosen=0))
     w.refresh_dub_view(); w.tabs.setCurrentIndex(1); app.processEvents()
     w.grab().save(str(tmp / "dub.png"))
     z = exporter.export_package(w.p, ["en"])
     assert z.exists()
     w.copy_file(z)
+    w.tabs.setCurrentIndex(2); app.processEvents()
+    w.grab().save(str(tmp / "send.png"))
     print("SELFTEST OK", tmp)
     out = os.environ.get("GOLOS_SHOTS")
     if out:
         import shutil
         Path(out).mkdir(parents=True, exist_ok=True)
-        for n in ("wave.png", "main.png", "dub.png"):
+        for n in ("edit.png", "dub.png", "send.png"):
             shutil.copy(tmp / n, Path(out) / n)
     w.close()
 

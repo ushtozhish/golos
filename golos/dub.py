@@ -55,8 +55,10 @@ class Dubber:
     def run(self, langs: list[str], n_variants: int = 3, verify: bool = True,
             only_ids: dict[str, set[int]] | None = None, temperature: float = 0.8):
         phrases = {ph.id: ph for ph in self.p.phrases()}
-        ref_audio, ref_text = self.p.reference_clip()
-        self.log(f"Образец голоса: {len(ref_audio) / 24000:.1f} с — «{ref_text[:80]}…»")
+        from . import voices
+        voice = voices.get(self.p.voice)
+        ref_audio, ref_text = voices.reference(voice, self.p)
+        self.log(f"Голос «{voice.name}»: образец {len(ref_audio) / 24000:.1f} с — «{ref_text[:80]}…»")
         by_model: dict[str, list[str]] = {}
         for lang in langs:
             by_model.setdefault(TTS_LANGS[lang][0], []).append(lang)
@@ -69,8 +71,8 @@ class Dubber:
             for pid, ph in phrases.items():
                 t = texts.get(pid, "").strip()
                 d = existing.get(pid)
-                if d is None or d.text != t:
-                    d = DubPhrase(id=pid, text=t)
+                if d is None or d.text != t or d.voice != voice.id:
+                    d = DubPhrase(id=pid, text=t, voice=voice.id)
                 lst.append(d)
             self.p.dub[lang] = lst
             for d in lst:
@@ -172,7 +174,7 @@ def build_track(p: Project, lang: str) -> tuple[np.ndarray, list[dict], list[str
     import soundfile as sf
     phrases = {ph.id: ph for ph in p.phrases()}
     items = sorted(p.dub.get(lang, []), key=lambda d: d.id)
-    total = p.edited_duration()
+    total = p.seq_duration()
     out = np.zeros(int((total + 1.0) * OUT_SR), dtype=np.float32)
     timings, warns = [], []
     cursor = 0.0

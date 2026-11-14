@@ -59,7 +59,7 @@ def export_package(p: Project, langs: list[str], log=print) -> Path:
                 "source_lang": p.source_lang, "sample_rate": 48000, "tracks": {}}
     _, src_items = export_source(p, folder)
     manifest["tracks"][p.source_lang] = {"file": f"{p.source_lang}.wav", "kind": "recording",
-                                         "duration": round(p.edited_duration(), 3), "phrases": src_items}
+                                         "duration": round(p.seq_duration(), 3), "phrases": src_items}
     log(f"{p.source_lang}: начитка экспортирована")
     for lang in langs:
         if lang == p.source_lang and not p.dub.get(lang):

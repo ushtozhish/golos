@@ -1,15 +1,15 @@
-"""Модель проекта: исходная запись, слова, резы, фразы, переводы, варианты озвучки.
+"""Модель проекта: исходная запись, ручной монтаж клипами, распознанный текст, переводы, варианты озвучки.
 
-Монтаж неразрушающий: исходный raw.wav не меняется, результат вычисляется
-из списка слов (вырезанные/оставленные), ручных резов и правил пауз.
+Монтаж неразрушающий: raw.wav не меняется. Результат — последовательность клипов
+(отрезков исходника), стоящих встык. Шкала «sequence» — время на смонтированной дорожке.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 from dataclasses import dataclass, field, asdict
-from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
@@ -19,46 +19,29 @@ from . import dsp
 SR = 48000
 HOP = 0.01
 
-FILLERS = {"э", "ээ", "эээ", "эм", "мм", "ммм", "хм", "а-а", "э-э", "uh", "um", "erm", "hmm"}
-
 
 @dataclass
 class Word:
     text: str
-    start: float
+    start: float   # на смонтированной шкале
     end: float
-    cut: bool = False      # вырезано (вручную или автоматически)
-    auto: str = ""         # причина авто-реза: "dup" | "filler" | ""
-
-
-@dataclass
-class Gap:
-    """Участок между словами, где есть речь, но Whisper её не распознал."""
-    start: float
-    end: float
-    cut: bool = True
 
 
 @dataclass
 class EditSettings:
-    shorten_pauses: bool = True
-    max_pause: float = 0.45      # паузы длиннее — укорачиваются
-    target_pause: float = 0.30   # до этой длины
-    sentence_pause: float = 0.45 # пауза после точки
-    head_tail: float = 0.15      # тишина в начале и конце
-    pad: float = 0.06            # запас вокруг слова
     denoise: bool = True
     denoise_strength: float = 0.75
     loudness: bool = True
     target_lufs: float = -16.0
+    pause_max: float = 0.6      # инструмент «Укоротить паузы»: паузы длиннее…
+    pause_target: float = 0.35  # …сокращаются до
 
 
 @dataclass
 class Phrase:
     id: int
     text: str
-    word_idx: list[int]
-    start: float = 0.0   # на смонтированной шкале
+    start: float = 0.0
     end: float = 0.0
 
     @property
@@ -80,6 +63,7 @@ class DubPhrase:
     text: str
     variants: list[Variant] = field(default_factory=list)
     chosen: int = -1
+    voice: str = ""
 
 
 def norm_text(s: str) -> str:
@@ -97,14 +81,15 @@ class Project:
         self.folder = Path(folder)
         self.name = self.folder.name
         self.audio: np.ndarray = np.zeros(0, dtype=np.float32)
-        self.words: list[Word] = []
-        self.gaps: list[Gap] = []
-        self.manual_cuts: list[list[float]] = []   # [start, end] на исходной шкале
+        self.clips: list[list[float]] = []       # [[a, b], ...] на исходной шкале, в порядке дорожки
+        self.words: list[Word] = []              # распознано по смонтированной дорожке
+        self.words_key: str = ""                 # монтаж, по которому распознано
         self.edit = EditSettings()
         self.source_lang = "ru"
         self.translations: dict[str, dict[int, str]] = {}
+        self.phrase_texts: dict[int, str] = {}   # исправленный вручную текст фраз
         self.dub: dict[str, list[DubPhrase]] = {}
-        self.ref_override: list[float] | None = None
+        self.voice = "me"                        # id голоса из библиотеки
         self._rms: np.ndarray | None = None
         self._undo: list[str] = []
         self._redo: list[str] = []
@@ -137,25 +122,43 @@ class Project:
         if p.json_path.exists():
             p._load_state(json.loads(p.json_path.read_text("utf-8")))
         if p.raw_path.exists():
-            p.load_audio_file(p.raw_path, copy=False)
+            import soundfile as sf
+            x, sr = sf.read(str(p.raw_path), dtype="float32", always_2d=False)
+            p.audio = dsp.resample(dsp.to_mono(x), sr, SR)
+            if not p.clips:
+                p.clips = [[0.0, p.duration]]
         return p
 
-    def load_audio_file(self, path: Path, copy: bool = True):
+    def load_audio_file(self, path: Path):
         import soundfile as sf
         x, sr = sf.read(str(path), dtype="float32", always_2d=False)
-        x = dsp.resample(dsp.to_mono(x), sr, SR)
-        self.set_audio(x, save=copy)
+        self.set_audio(dsp.resample(dsp.to_mono(x), sr, SR))
 
-    def set_audio(self, x: np.ndarray, save: bool = True):
+    def set_audio(self, x: np.ndarray):
+        """Новая запись: заменяет всё."""
         self.audio = x.astype(np.float32)
         self._rms = None
-        if save:
-            import soundfile as sf
-            sf.write(str(self.raw_path), self.audio, SR, subtype="PCM_24")
-            self.words, self.gaps, self.manual_cuts = [], [], []
-            self.dub, self.translations = {}, {}
-            self._undo.clear(); self._redo.clear()
-            self.save()
+        self.clips = [[0.0, self.duration]] if len(x) else []
+        self.words, self.words_key = [], ""
+        self.dub, self.translations, self.phrase_texts = {}, {}, {}
+        self._undo.clear(); self._redo.clear()
+        self._write_raw()
+        self.save()
+
+    def append_audio(self, x: np.ndarray):
+        """Дозапись: добавляет новый кусок в конец исходника и клипом в конец дорожки."""
+        self.checkpoint()
+        a = self.duration
+        gap = np.zeros(int(0.05 * SR), np.float32)
+        self.audio = np.concatenate([self.audio, gap, x.astype(np.float32)])
+        self._rms = None
+        self.clips.append([a + 0.05, self.duration])
+        self._write_raw()
+        self.save()
+
+    def _write_raw(self):
+        import soundfile as sf
+        sf.write(str(self.raw_path), self.audio, SR, subtype="PCM_24")
 
     @property
     def duration(self) -> float:
@@ -169,35 +172,38 @@ class Project:
 
     def _state(self) -> dict:
         return {
-            "version": 1,
+            "version": 2,
             "source_lang": self.source_lang,
+            "clips": self.clips,
             "words": [asdict(w) for w in self.words],
-            "gaps": [asdict(g) for g in self.gaps],
-            "manual_cuts": self.manual_cuts,
+            "words_key": self.words_key,
             "edit": asdict(self.edit),
             "translations": {k: {str(i): t for i, t in v.items()} for k, v in self.translations.items()},
-            "dub": {k: [{"id": d.id, "text": d.text, "chosen": d.chosen,
+            "phrase_texts": {str(k): v for k, v in self.phrase_texts.items()},
+            "dub": {k: [{"id": d.id, "text": d.text, "chosen": d.chosen, "voice": d.voice,
                          "variants": [asdict(v) for v in d.variants]} for d in v]
                     for k, v in self.dub.items()},
-            "ref_override": self.ref_override,
+            "voice": self.voice,
         }
 
     def _load_state(self, s: dict):
         self.source_lang = s.get("source_lang", "ru")
+        self.clips = [list(c) for c in s.get("clips", [])]
         self.words = [Word(**w) for w in s.get("words", [])]
-        self.gaps = [Gap(**g) for g in s.get("gaps", [])]
-        self.manual_cuts = s.get("manual_cuts", [])
+        self.words_key = s.get("words_key", "")
         e = EditSettings()
         for k, v in s.get("edit", {}).items():
             if hasattr(e, k):
                 setattr(e, k, v)
         self.edit = e
         self.translations = {k: {int(i): t for i, t in v.items()} for k, v in s.get("translations", {}).items()}
+        self.phrase_texts = {int(k): v for k, v in s.get("phrase_texts", {}).items()}
         self.dub = {}
         for k, lst in s.get("dub", {}).items():
             self.dub[k] = [DubPhrase(id=d["id"], text=d["text"], chosen=d.get("chosen", -1),
+                                     voice=d.get("voice", ""),
                                      variants=[Variant(**v) for v in d.get("variants", [])]) for d in lst]
-        self.ref_override = s.get("ref_override")
+        self.voice = s.get("voice", "me")
 
     def save(self):
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -206,189 +212,185 @@ class Project:
         tmp.replace(self.json_path)
 
     # ---------- отмена ----------
-    def _edit_snapshot(self) -> str:
-        return json.dumps({"w": [[w.cut, w.auto] for w in self.words],
-                           "g": [g.cut for g in self.gaps],
-                           "m": self.manual_cuts, "e": asdict(self.edit)})
-
     def checkpoint(self):
-        self._undo.append(self._edit_snapshot())
-        if len(self._undo) > 300:
+        self._undo.append(json.dumps(self.clips))
+        if len(self._undo) > 500:
             self._undo.pop(0)
         self._redo.clear()
-
-    def _restore(self, snap: str):
-        s = json.loads(snap)
-        for w, (c, a) in zip(self.words, s["w"]):
-            w.cut, w.auto = c, a
-        for g, c in zip(self.gaps, s["g"]):
-            g.cut = c
-        self.manual_cuts = s["m"]
-        for k, v in s["e"].items():
-            setattr(self.edit, k, v)
 
     def undo(self) -> bool:
         if not self._undo:
             return False
-        self._redo.append(self._edit_snapshot())
-        self._restore(self._undo.pop())
+        self._redo.append(json.dumps(self.clips))
+        self.clips = json.loads(self._undo.pop())
         return True
 
     def redo(self) -> bool:
         if not self._redo:
             return False
-        self._undo.append(self._edit_snapshot())
-        self._restore(self._redo.pop())
+        self._undo.append(json.dumps(self.clips))
+        self.clips = json.loads(self._redo.pop())
         return True
 
-    # ---------- распознавание → авторазметка ----------
-    def set_words(self, words: list[Word]):
-        dur = self.duration
-        clean = []
-        for w in words:
-            t = w.text.strip()
-            if not t:
-                continue
-            s = max(0.0, min(w.start, dur))
-            e = max(s + 0.02, min(w.end if w.end else s + 0.3, dur))
-            clean.append(Word(text=t, start=s, end=e))
-        self.words = clean
-        self._find_gaps()
-        self.auto_mark()
-        self.dub, self.translations = {}, {}
-        self.save()
-
-    def _find_gaps(self):
-        """Ищет речь, которую Whisper пропустил (часто это повторы и оговорки)."""
-        self.gaps = []
-        mask = dsp.speech_mask(self.rms)
-        bounds = [0.0] + [t for w in self.words for t in (w.start, w.end)] + [self.duration]
-        for a, b in zip(bounds[0::2], bounds[1::2]):
-            if b - a < 0.4:
-                continue
-            i0, i1 = int((a + 0.1) / HOP), int((b - 0.1) / HOP)
-            seg = mask[i0:i1]
-            if len(seg) and seg.sum() * HOP >= 0.25:
-                idx = np.nonzero(seg)[0]
-                s = (i0 + idx[0]) * HOP
-                e = (i0 + idx[-1] + 1) * HOP
-                self.gaps.append(Gap(start=s, end=e, cut=True))
-
-    def raw_phrases(self) -> list[list[int]]:
-        """Группы слов по знакам конца фразы и паузам — для поиска дублей."""
-        groups, cur = [], []
-        for i, w in enumerate(self.words):
-            if cur:
-                prev = self.words[cur[-1]]
-                if w.start - prev.end > 0.6 or ends_sentence(prev.text) or prev.text.strip().endswith(","):
-                    if w.start - prev.end > 0.35 or ends_sentence(prev.text):
-                        groups.append(cur); cur = []
-            cur.append(i)
-        if cur:
-            groups.append(cur)
-        return groups
-
-    def auto_mark(self):
-        """Помечает дубли (ранние попытки фразы) и слова-паразиты."""
-        for w in self.words:
-            if w.auto:
-                w.cut, w.auto = False, ""
-        for w in self.words:
-            if norm_text(w.text) in FILLERS:
-                w.cut, w.auto = True, "filler"
-        groups = self.raw_phrases()
-        toks = [[norm_text(self.words[i].text) for i in g] for g in groups]
-        for gi, a in enumerate(toks):
-            a = [t for t in a if t]
-            if not a:
-                continue
-            for gj in range(gi + 1, min(gi + 4, len(toks))):
-                b = [t for t in toks[gj] if t]
-                if not b:
-                    continue
-                if _is_retake(a, b):
-                    for i in groups[gi]:
-                        self.words[i].cut, self.words[i].auto = True, "dup"
-                    break
-            else:
-                # фальстарт внутри одной группы: «клиент хочет — клиент хочет видеть»
-                _mark_inner_restart(self.words, groups[gi])
-
-    def clear_auto(self):
-        for w in self.words:
-            if w.auto:
-                w.cut, w.auto = False, ""
-
-    # ---------- вычисление монтажа ----------
-    def keep_regions(self) -> list[tuple[float, float]]:
-        """Участки исходника, которые идут в результат (исходная шкала)."""
-        e = self.edit
-        dur = self.duration
-        if dur <= 0:
-            return []
-        if not self.words:
-            regions = [(0.0, dur)]
-        else:
-            kept = [i for i, w in enumerate(self.words) if not w.cut]
-            if not kept:
-                return []
-            first, last = self.words[kept[0]], self.words[kept[-1]]
-            regions = []
-            cur_s = max(0.0, first.start - e.head_tail)
-            for k_prev, k in zip(kept, kept[1:]):
-                wp, w = self.words[k_prev], self.words[k]
-                gap = w.start - wp.end
-                removed = (k - k_prev > 1) or self._gap_cut_between(wp.end, w.start)
-                sent = ends_sentence(wp.text)
-                target = e.sentence_pause if sent else e.target_pause
-                limit = e.sentence_pause if sent else e.max_pause
-                if removed or (e.shorten_pauses and gap > limit):
-                    want = max(0.08, min(gap, target))
-                    half = want / 2
-                    a, b = wp.end + half, w.start - half
-                    if b > a:
-                        regions.append((cur_s, a))
-                        cur_s = b
-            regions.append((cur_s, min(dur, last.end + e.head_tail)))
-        snapped = []
-        for a, b in regions:
-            a2 = dsp.snap_to_quiet(a, self.rms, HOP, 0.025) if a > 0 else a
-            b2 = dsp.snap_to_quiet(b, self.rms, HOP, 0.025) if b < dur else b
-            if b2 - a2 > 0.02:
-                snapped.append((max(0.0, a2), min(dur, b2)))
-        regions = _subtract(snapped, [tuple(c) for c in self.manual_cuts])
-        return _merge(regions)
-
-    def _gap_cut_between(self, a: float, b: float) -> bool:
-        return any(g.cut and g.start >= a - 0.05 and g.end <= b + 0.05 for g in self.gaps)
-
-    def edited_duration(self) -> float:
-        return sum(b - a for a, b in self.keep_regions())
-
-    def orig_to_edit(self, t: float, regions=None) -> float | None:
-        regions = regions if regions is not None else self.keep_regions()
-        acc = 0.0
-        for a, b in regions:
-            if t < a:
-                return acc
-            if t <= b:
-                return acc + (t - a)
+    # ---------- шкала дорожки ----------
+    def clip_starts(self) -> list[float]:
+        out, acc = [], 0.0
+        for a, b in self.clips:
+            out.append(acc)
             acc += b - a
-        return acc
+        return out
 
-    def edit_to_orig(self, t: float, regions=None) -> float:
-        regions = regions if regions is not None else self.keep_regions()
+    def seq_duration(self) -> float:
+        return sum(b - a for a, b in self.clips)
+
+    def clip_at(self, t: float) -> int:
+        """Индекс клипа под временем t дорожки (-1, если вне дорожки)."""
         acc = 0.0
-        for a, b in regions:
+        for i, (a, b) in enumerate(self.clips):
+            if acc <= t < acc + (b - a):
+                return i
+            acc += b - a
+        return len(self.clips) - 1 if self.clips and abs(t - acc) < 1e-6 else -1
+
+    def seq_to_orig(self, t: float) -> float:
+        acc = 0.0
+        for a, b in self.clips:
             if t <= acc + (b - a):
-                return a + (t - acc)
+                return a + max(0.0, t - acc)
             acc += b - a
-        return regions[-1][1] if regions else 0.0
+        return self.clips[-1][1] if self.clips else 0.0
 
-    def render(self, process: bool = True, regions=None) -> np.ndarray:
-        regions = regions if regions is not None else self.keep_regions()
-        chunks = [self.audio[int(a * SR): int(b * SR)] for a, b in regions]
-        y = dsp.concat_crossfade(chunks, SR)
+    # ---------- инструменты монтажа ----------
+    def split(self, t: float) -> bool:
+        """T — разрезать клип в точке t дорожки."""
+        i = self.clip_at(t)
+        if i < 0:
+            return False
+        a, b = self.clips[i]
+        o = a + (t - self.clip_starts()[i])
+        if o - a < 0.01 or b - o < 0.01:
+            return False
+        self.checkpoint()
+        self.clips[i:i + 1] = [[a, o], [o, b]]
+        return True
+
+    def delete_clips(self, idx: set[int]) -> bool:
+        if not idx:
+            return False
+        self.checkpoint()
+        self.clips = [c for i, c in enumerate(self.clips) if i not in idx]
+        return True
+
+    def delete_range(self, t0: float, t1: float, checkpoint: bool = True) -> bool:
+        """Вырезать участок дорожки [t0, t1] со сдвигом (дырка закрывается)."""
+        if t1 - t0 < 0.005:
+            return False
+        if checkpoint:
+            self.checkpoint()
+        out, acc = [], 0.0
+        for a, b in self.clips:
+            s, e = acc, acc + (b - a)
+            acc = e
+            if e <= t0 or s >= t1:
+                out.append([a, b]); continue
+            if s < t0:
+                out.append([a, a + (t0 - s)])
+            if e > t1:
+                out.append([a + (t1 - s), b])
+        self.clips = [c for c in out if c[1] - c[0] > 0.005]
+        return True
+
+    def trim_to(self, i: int, t: float, side: str) -> bool:
+        """Q/W — обрезать начало/конец клипа i до точки t дорожки."""
+        if not 0 <= i < len(self.clips):
+            return False
+        a, b = self.clips[i]
+        s = self.clip_starts()[i]
+        o = a + (t - s)
+        if not a < o < b:
+            return False
+        self.checkpoint()
+        self.clips[i] = [o, b] if side == "start" else [a, o]
+        return True
+
+    def set_clip_edge(self, i: int, side: str, orig_t: float, checkpoint: bool):
+        """Перетаскивание края клипа мышью (в пределах исходника)."""
+        if checkpoint:
+            self.checkpoint()
+        a, b = self.clips[i]
+        if side == "start":
+            self.clips[i][0] = float(np.clip(orig_t, 0.0, b - 0.02))
+        else:
+            self.clips[i][1] = float(np.clip(orig_t, a + 0.02, self.duration))
+
+    def restore_all(self):
+        self.checkpoint()
+        self.clips = [[0.0, self.duration]]
+
+    def silences(self, min_len: float) -> list[tuple[float, float]]:
+        """Паузы на дорожке длиннее min_len (по энергии)."""
+        mask = dsp.speech_mask(self.rms)
+        out = []
+        for (a, b), s in zip(self.clips, self.clip_starts()):
+            i0, i1 = int(a / HOP), int(b / HOP)
+            seg = ~mask[i0:i1]
+            run = 0
+            for k, quiet in enumerate(np.append(seg, False)):
+                if quiet:
+                    run += 1
+                else:
+                    if run * HOP >= 0.05:
+                        st = s + (k - run) * HOP
+                        en = s + k * HOP
+                        out.append((st, en))
+                    run = 0
+        merged: list[tuple[float, float]] = []
+        for a, b in sorted(out):              # пауза через стык клипов — одна пауза
+            if merged and a - merged[-1][1] < 0.02:
+                merged[-1] = (merged[-1][0], b)
+            else:
+                merged.append((a, b))
+        return [(a, b) for a, b in merged if b - a >= min_len]
+
+    def shorten_pauses(self, max_len: float, target: float) -> int:
+        """Инструмент «Укоротить паузы»: каждую паузу длиннее max_len сокращает до target.
+        Это обычные резы — их видно на дорожке, отменяются одним Ctrl+Z."""
+        total = self.seq_duration()
+        sil = self.silences(max_len)
+        if not sil:
+            return 0
+        self.checkpoint()
+        n = 0
+        for a, b in sorted(sil, reverse=True):     # с конца, чтобы не сдвигать время
+            edge = a <= 0.05 or b >= total - 0.05
+            keep = min(target, 0.15) if edge else target
+            if b - a <= keep + 0.01:
+                continue
+            if a <= 0.05:
+                self.delete_range(a, b - keep, checkpoint=False)
+            elif b >= total - 0.05:
+                self.delete_range(a + keep, b, checkpoint=False)
+            else:
+                self.delete_range(a + keep / 2, b - keep / 2, checkpoint=False)
+            n += 1
+        if n == 0:
+            self._undo.pop()
+        return n
+
+    # ---------- результат ----------
+    def keep_regions(self) -> list[tuple[float, float]]:
+        return [(a, b) for a, b in self.clips if b > a]
+
+    def edit_key(self) -> str:
+        return hashlib.md5(json.dumps([[round(a, 4), round(b, 4)] for a, b in self.clips]).encode()).hexdigest()
+
+    @property
+    def words_fresh(self) -> bool:
+        return bool(self.words) and self.words_key == self.edit_key()
+
+    def render(self, process: bool = True) -> np.ndarray:
+        chunks = [self.audio[int(a * SR): int(b * SR)] for a, b in self.keep_regions()]
+        y = dsp.concat_crossfade(chunks, SR, 0.008)
         if process and len(y):
             if self.edit.denoise:
                 y = dsp.denoise(y, SR, self.edit.denoise_strength)
@@ -397,44 +399,51 @@ class Project:
             y = dsp.fade_edges(y, SR)
         return y
 
-    # ---------- фразы для перевода ----------
+    def set_words(self, words: list[Word]):
+        dur = self.seq_duration()
+        clean = []
+        for w in words:
+            t = w.text.strip()
+            if not t:
+                continue
+            s = max(0.0, min(w.start, dur))
+            e = max(s + 0.02, min(w.end if w.end else s + 0.3, dur))
+            clean.append(Word(text=t, start=s, end=e))
+        old = {ph.id: ph.text for ph in self.phrases()} if self.words else {}
+        self.words = clean
+        self.words_key = self.edit_key()
+        new = {ph.id: ph.text for ph in self.phrases()}
+        if old != new:
+            self.phrase_texts = {}
+        self.save()
+
+    # ---------- фразы ----------
     def phrases(self) -> list[Phrase]:
-        regions = self.keep_regions()
-        kept = [i for i, w in enumerate(self.words) if not w.cut]
         out: list[Phrase] = []
-        cur: list[int] = []
+        cur: list[Word] = []
 
         def flush():
             if not cur:
                 return
-            text = " ".join(self.words[i].text.strip() for i in cur)
+            text = " ".join(w.text.strip() for w in cur)
             text = re.sub(r"\s+([,.!?…:;])", r"\1", text)
-            s = self.orig_to_edit(max(0.0, self.words[cur[0]].start - 0.03), regions)
-            e = self.orig_to_edit(self.words[cur[-1]].end + 0.03, regions)
-            out.append(Phrase(id=len(out) + 1, text=text, word_idx=list(cur), start=s, end=e))
+            pid = len(out) + 1
+            out.append(Phrase(id=pid, text=self.phrase_texts.get(pid, text),
+                              start=max(0.0, cur[0].start - 0.03), end=cur[-1].end + 0.03))
 
-        for k in kept:
-            w = self.words[k]
-            if cur:
-                prev = self.words[cur[-1]]
-                if ends_sentence(prev.text) or (w.start - prev.end > 0.9):
-                    flush(); cur = []
-            cur.append(k)
+        for w in self.words:
+            if cur and (ends_sentence(cur[-1].text) or w.start - cur[-1].end > 0.9):
+                flush(); cur = []
+            cur.append(w)
         flush()
         return out
 
-    # ---------- образец голоса для клонирования ----------
+    # ---------- образец голоса ----------
     def reference_clip(self, min_s: float = 6.0, max_s: float = 14.0):
-        """Возвращает (аудио 24 кГц, текст) — подряд идущие фразы без резов внутри."""
-        if self.ref_override:
-            a, b = self.ref_override
-            words = [w for w in self.words if w.start >= a and w.end <= b and not w.cut]
-            x = self.audio[int(a * SR): int(b * SR)]
-            return dsp.resample(x, SR, 24000), " ".join(w.text for w in words)
-        regions = self.keep_regions()
+        """(аудио 24 кГц, текст) — подряд идущие фразы смонтированной дорожки, ~10 с."""
         phr = self.phrases()
         if not phr:
-            raise RuntimeError("no speech")
+            raise RuntimeError("Сначала распознайте начитку")
         best = None
         for i in range(len(phr)):
             for j in range(i, len(phr)):
@@ -443,73 +452,18 @@ class Project:
                     break
                 if total >= min_s and (best is None or abs(total - 10) < abs(best[2] - 10)):
                     best = (i, j, total)
-        if best is None:  # запись короче min_s — берём всё
+        if best is None:
             best = (0, len(phr) - 1, phr[-1].end - phr[0].start)
             if best[2] > max_s:
                 best = (0, 0, phr[0].dur)
         i, j, _ = best
-        y = self.render(process=False, regions=regions)
-        a = max(0.0, phr[i].start - 0.05)
-        b = phr[j].end + 0.1
+        y = self.render(process=False)
+        a, b = max(0.0, phr[i].start - 0.05), phr[j].end + 0.1
         x = y[int(a * SR): int(b * SR)]
         if self.edit.denoise:
             x = dsp.denoise(x, SR, self.edit.denoise_strength)
         text = " ".join(ph.text for ph in phr[i:j + 1])
         return dsp.resample(x, SR, 24000), text
-
-
-def _is_retake(a: list[str], b: list[str]) -> bool:
-    """a — ранняя попытка b, если a совпадает с началом b (оборванный или полный дубль)."""
-    if len(a) > len(b) + 2:
-        return False
-    head = b[: len(a) + 1]
-    r = SequenceMatcher(None, a, head).ratio()
-    if len(a) <= 2:
-        return a == b[: len(a)]
-    return r >= 0.72
-
-
-def _mark_inner_restart(words: list[Word], group: list[int]):
-    toks = [norm_text(words[i].text) for i in group]
-    n = len(toks)
-    for size in (4, 3, 2):
-        for i in range(0, n - 2 * size + 1):
-            if toks[i:i + size] == toks[i + size:i + 2 * size] and all(toks[i:i + size]):
-                for k in group[i:i + size]:
-                    if not words[k].cut:
-                        words[k].cut, words[k].auto = True, "dup"
-                return
-
-
-def _merge(regs):
-    regs = sorted((a, b) for a, b in regs if b > a)
-    out = []
-    for a, b in regs:
-        if out and a <= out[-1][1] + 1e-4:
-            out[-1] = (out[-1][0], max(out[-1][1], b))
-        else:
-            out.append((a, b))
-    return out
-
-
-def _subtract(regs, cuts):
-    cuts = _merge(cuts)
-    out = []
-    for a, b in regs:
-        segs = [(a, b)]
-        for ca, cb in cuts:
-            nxt = []
-            for s, e in segs:
-                if cb <= s or ca >= e:
-                    nxt.append((s, e))
-                else:
-                    if ca > s:
-                        nxt.append((s, ca))
-                    if cb < e:
-                        nxt.append((cb, e))
-            segs = nxt
-        out.extend(segs)
-    return [(a, b) for a, b in out if b - a > 0.01]
 
 
 def new_project_dir(root: Path) -> Path:

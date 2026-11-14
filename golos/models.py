@@ -16,6 +16,9 @@ from . import dsp
 WHISPER_ID = "openai/whisper-large-v3-turbo"
 TTS_BASE_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 TTS_KK_ID = "nur-dev/ait-syn"
+TTS_DESIGN_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+TTS_PRESET_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+PRESET_SPEAKERS = ["Ryan", "Aiden", "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ono_Anna", "Sohee"]
 
 # Языки синтеза: код → (модель, имя языка для модели, подпись)
 TTS_LANGS = {
@@ -212,6 +215,33 @@ class TTS:
                 raise FloatingPointError("NaN или тишина в синтезе")
             out.append(w)
         return out, int(sr)
+
+    # --- создание голосов (модели VoiceDesign / CustomVoice) ---
+    def design(self, text: str, language: str, instruct: str):
+        for lang in (language, language.capitalize()):
+            try:
+                wavs, sr = self.model.generate_voice_design(text=text, language=lang, instruct=instruct)
+                return np.asarray(wavs[0], np.float32).reshape(-1), int(sr)
+            except (ValueError, KeyError, AssertionError) as e:
+                last = e
+        raise last
+
+    def preset(self, text: str, language: str, speaker: str, instruct: str = ""):
+        for lang in (language, language.capitalize()):
+            try:
+                wavs, sr = self.model.generate_custom_voice(text=text, language=lang, speaker=speaker,
+                                                            instruct=instruct or None)
+                return np.asarray(wavs[0], np.float32).reshape(-1), int(sr)
+            except (ValueError, KeyError, AssertionError) as e:
+                last = e
+        raise last
+
+    def speakers(self) -> list[str]:
+        try:
+            sp = self.model.get_supported_speakers()
+            return list(sp.keys()) if isinstance(sp, dict) else list(sp)
+        except Exception:  # noqa: BLE001
+            return PRESET_SPEAKERS
 
     def close(self):
         del self.model
