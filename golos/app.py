@@ -271,7 +271,7 @@ class MainWindow(QMainWindow):
         self.rec_btn = QPushButton("● " + T("Запись", "Record") + "  (R)")
         self.rec_btn.setStyleSheet("QPushButton{background:#a3242f;color:white;font-weight:bold;padding:8px 16px}")
         self.rec_btn.clicked.connect(lambda: self.toggle_record())
-        self.append_btn = QPushButton("＋ " + T("Дозаписать в конец", "Record more at the end"))
+        self.append_btn = QPushButton("+ " + T("Дозаписать в конец", "Record more at the end"))
         self.append_btn.clicked.connect(lambda: self.toggle_record(append=True))
         self.level = QProgressBar(); self.level.setRange(0, 100); self.level.setTextVisible(False)
         self.level.setMaximumWidth(200)
@@ -289,11 +289,11 @@ class MainWindow(QMainWindow):
         self.tl.view.edited.connect(self.edits_changed)
         tools = QHBoxLayout()
         for text, fn, tip in [
-            ("✂ " + T("Разрезать", "Split") + " (T)", self.split, ""),
-            ("🗑 " + T("Удалить", "Delete") + " (Del)", self.delete_sel, ""),
-            ("⇤ " + T("Обрезать начало", "Trim start") + " (Q)", lambda: self.trim("start"), ""),
-            ("⇥ " + T("Обрезать конец", "Trim end") + " (W)", lambda: self.trim("end"), ""),
-            ("↶", self.undo, "Ctrl+Z"), ("↷", self.redo, "Ctrl+Y"),
+            (T("Разрезать", "Split") + " (T)", self.split, ""),
+            (T("Удалить", "Delete") + " (Del)", self.delete_sel, ""),
+            (T("Обрезать начало", "Trim start") + " (Q)", lambda: self.trim("start"), ""),
+            (T("Обрезать конец", "Trim end") + " (W)", lambda: self.trim("end"), ""),
+            (T("Отменить", "Undo") + " (Ctrl+Z)", self.undo, ""), (T("Повторить", "Redo") + " (Ctrl+Y)", self.redo, ""),
             (T("Вся дорожка", "Fit") + " (0)", lambda: self.tl.view.zoom_all(), ""),
         ]:
             b = QPushButton(text); b.clicked.connect(fn); b.setFocusPolicy(Qt.NoFocus)
@@ -339,7 +339,7 @@ class MainWindow(QMainWindow):
         self.asr_btn.clicked.connect(lambda: self.run_asr(None))
         side.addWidget(self.asr_btn)
         side.addStretch(1)
-        self.send_btn = QPushButton(T("Отправить на перевод  ➜", "Send to translation  ➜"))
+        self.send_btn = QPushButton(T("Отправить на перевод  →", "Send to translation  →"))
         self.send_btn.setStyleSheet("QPushButton{background:#2f6fd0;color:white;font-weight:bold;padding:12px}")
         self.send_btn.clicked.connect(self.send_to_translation)
         side.addWidget(self.send_btn)
@@ -365,7 +365,7 @@ class MainWindow(QMainWindow):
         r = QHBoxLayout()
         nb = QPushButton(T("Новый голос…", "New voice…")); nb.clicked.connect(self.new_voice)
         pb = QPushButton("▶"); pb.setToolTip(T("Послушать образец", "Play sample")); pb.clicked.connect(self.play_voice)
-        db = QPushButton("🗑"); db.setToolTip(T("Удалить голос", "Delete voice")); db.clicked.connect(self.delete_voice)
+        db = QPushButton(T("Удалить", "Delete")); db.setToolTip(T("Удалить голос", "Delete voice")); db.clicked.connect(self.delete_voice)
         r.addWidget(nb); r.addWidget(pb); r.addWidget(db)
         f0.addWidget(self.voice_box); f0.addLayout(r)
         note = QLabel(T("Любой голос говорит на всех выбранных языках, включая казахский.",
@@ -426,7 +426,7 @@ class MainWindow(QMainWindow):
         self.play_track_btn = QPushButton("▶ " + T("Слушать дорожку", "Play track"))
         self.play_track_btn.clicked.connect(self.play_track)
         stop = QPushButton("■"); stop.clicked.connect(self.stop_play)
-        self.regen_btn = QPushButton("↻ " + T("Перегенерировать выделенные фразы", "Regenerate selected phrases"))
+        self.regen_btn = QPushButton(T("Перегенерировать выделенные фразы", "Regenerate selected phrases"))
         self.regen_btn.clicked.connect(self.regen_selected)
         row.addWidget(self.play_track_btn); row.addWidget(stop); row.addWidget(self.regen_btn)
         row.addStretch(1)
