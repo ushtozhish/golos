@@ -52,6 +52,8 @@ def main():
     assert w.p.phrases()[0].text == "Клиент хочет видеть цвет.", w.p.phrases()[0].text
     w.text.item(1, 2).setText("GradeStream — бесплатно.")   # правка прямо в таблице
     assert w.p.phrases()[1].text == "GradeStream — бесплатно.", w.p.phrases()[1].text
+    n = w.p.apply_script("Клиент хочет видеть грейд, понимаете? GradeStream — бесплатно!")
+    assert n == 2 and w.p.phrases()[1].text == "GradeStream — бесплатно!", [x.text for x in w.p.phrases()]
     w.text.rebuild(); w.tabs.setCurrentIndex(0); app.processEvents()
     w.grab().save(str(tmp / "edit.png"))
     ph = w.p.phrases()

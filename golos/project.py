@@ -438,6 +438,58 @@ class Project:
         flush()
         return out
 
+    def apply_script(self, script: str) -> int:
+        """Раскладывает вставленный пользователем текст по распознанным фразам.
+        Слова распознавания выравниваются со словами текста; каждая фраза получает
+        кусок текста между своим первым и последним совпавшим словом. Возвращает число фраз."""
+        from difflib import SequenceMatcher
+        sw = script.split()
+        if not sw or not self.words:
+            return 0
+        a = [norm_text(w.text) for w in self.words]
+        b = [norm_text(w) for w in sw]
+        amap: dict[int, int] = {}
+        for blk in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+            for k in range(blk.size):
+                amap[blk.a + k] = blk.b + k
+        # границы фраз в индексах слов распознавания
+        groups, cur = [], []
+        for i, w in enumerate(self.words):
+            if cur and (ends_sentence(self.words[cur[-1]].text) or w.start - self.words[cur[-1]].end > 0.9):
+                groups.append(cur); cur = []
+            cur.append(i)
+        if cur:
+            groups.append(cur)
+        # для каждой фразы — индекс начала её куска в тексте (интерполяция, если слова не совпали)
+        n = len(self.words)
+        known = sorted(amap.items())
+
+        def b_at(i: int) -> float:
+            if i in amap:
+                return amap[i]
+            lo = max(((x, y) for x, y in known if x < i), default=(-1, -1))
+            hi = min(((x, y) for x, y in known if x > i), default=(n, len(sw)))
+            return lo[1] + (hi[1] - lo[1]) * (i - lo[0]) / max(1, hi[0] - lo[0])
+
+        starts = [0] + [int(round(b_at(g[0]))) for g in groups[1:]]
+        # сдвиг начала к ближайшей границе предложения в тексте (±3 слова)
+        for k in range(1, len(starts)):
+            best = starts[k]
+            for d in (0, -1, 1, -2, 2, -3, 3):
+                j = starts[k] + d
+                if 0 < j < len(sw) and re.search(r"[.!?…]\W*$", sw[j - 1]):
+                    best = j
+                    break
+            starts[k] = max(starts[k - 1] + 1 if starts[k - 1] < len(sw) else starts[k - 1], best)
+        starts.append(len(sw))
+        self.phrase_texts = {}
+        for k in range(len(groups)):
+            chunk = " ".join(sw[starts[k]:starts[k + 1]]).strip()
+            if chunk:
+                self.phrase_texts[k + 1] = chunk
+        self.save()
+        return len(groups)
+
     # ---------- образец голоса ----------
     def reference_clip(self, min_s: float = 6.0, max_s: float = 14.0):
         """(аудио 24 кГц, текст) — подряд идущие фразы смонтированной дорожки, ~10 с."""

@@ -339,6 +339,11 @@ class MainWindow(QMainWindow):
         self.asr_btn = QPushButton(T("① Распознать текст", "① Recognize text"))
         self.asr_btn.clicked.connect(lambda: self.run_asr(None))
         side.addWidget(self.asr_btn)
+        self.script_btn = QPushButton(T("Вставить свой текст…", "Paste my own text…"))
+        self.script_btn.setToolTip(T("Вставьте текст, который вы читали: он заменит распознанный и разложится по фразам",
+                                     "Paste the text you read: it replaces the recognized one, split into phrases"))
+        self.script_btn.clicked.connect(self.paste_script)
+        side.addWidget(self.script_btn)
         side.addStretch(1)
         self.send_btn = QPushButton(T("② Текст проверен — отправить на перевод  →",
                                       "② Text checked — send to translation  →"))
@@ -498,6 +503,7 @@ class MainWindow(QMainWindow):
         self.play_btn.setEnabled(has_audio)
         self.append_btn.setEnabled(has_audio and self.rec is None)
         self.asr_btn.setEnabled(has_audio and not busy)
+        self.script_btn.setEnabled(has_audio and not busy)
         self.send_btn.setEnabled(has_audio and not busy)
         for b in (self.copy_req_btn, self.paste_btn, self.dub_btn):
             b.setEnabled(has_words and not busy)
@@ -831,6 +837,42 @@ class MainWindow(QMainWindow):
             return
         self.copy_request()
         self.tabs.setCurrentIndex(1)
+
+    def paste_script(self):
+        """Свой текст вместо распознанного: распознавание даёт только границы и тайминги фраз."""
+        if not self.p or not self.p.clips:
+            return
+        dlg = QDialog(self); dlg.setWindowTitle(T("Свой текст", "My own text")); dlg.resize(700, 480)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel(T("Вставьте текст, который вы читали (Ctrl+V). Пропущенные или лишние слова не страшны — "
+                             "программа сама сопоставит текст с записью и разложит по фразам. "
+                             "Английские слова пишите как надо (GradeStream, DaVinci Resolve).",
+                             "Paste the text you read (Ctrl+V). Missing or extra words are fine — it is matched "
+                             "to the recording and split into phrases.")))
+        ed = QPlainTextEdit()
+        clip = QApplication.clipboard().text()
+        if clip and not bridge.looks_like_answer(clip) and bridge.MARK not in clip and len(clip.split()) > 3:
+            ed.setPlainText(clip)
+        v.addWidget(ed, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); v.addWidget(bb)
+        if not dlg.exec() or not ed.toPlainText().strip():
+            return
+        script = ed.toPlainText()
+        self.s.setValue("last_script", script)
+
+        def apply():
+            n = self.p.apply_script(script)
+            self.text.rebuild(); self.fill_dub_table()
+            self.log(T(f"Ваш текст разложен по {n} фразам. Проверьте границы и при необходимости поправьте "
+                       f"(двойной клик по фразе), затем «② Отправить на перевод».",
+                       f"Your text was split into {n} phrases. Check and fix if needed, then «② Send»."))
+
+        if self.p.words_fresh:
+            apply()
+        else:
+            self.log(T("Сначала распознаю запись, чтобы найти границы фраз…", "Recognizing to find phrase boundaries…"))
+            self.run_asr(apply)
 
     def on_phrase_edited(self, pid: int, text: str):
         if not self.p:
