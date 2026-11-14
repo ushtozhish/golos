@@ -1,0 +1,219 @@
+"""Загрузка моделей на видеокарту: Whisper (распознавание) и Qwen3-TTS / AIT-Syn (синтез).
+
+В памяти держим не больше одной модели синтеза — 8 ГБ видеопамяти хватает
+на Whisper (~1,6 ГБ) + одну TTS-модель 1.7B в fp16 (~4 ГБ).
+"""
+from __future__ import annotations
+
+import gc
+import inspect
+from typing import Callable
+
+import numpy as np
+
+from . import dsp
+
+WHISPER_ID = "openai/whisper-large-v3-turbo"
+TTS_BASE_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+TTS_KK_ID = "nur-dev/ait-syn"
+
+# Языки синтеза: код → (модель, имя языка для модели, подпись)
+TTS_LANGS = {
+    "ru": (TTS_BASE_ID, "russian", "Русский"),
+    "en": (TTS_BASE_ID, "english", "English"),
+    "kk": (TTS_KK_ID, "kazakh", "Қазақша"),
+    "de": (TTS_BASE_ID, "german", "Deutsch"),
+    "fr": (TTS_BASE_ID, "french", "Français"),
+    "es": (TTS_BASE_ID, "spanish", "Español"),
+    "it": (TTS_BASE_ID, "italian", "Italiano"),
+    "pt": (TTS_BASE_ID, "portuguese", "Português"),
+    "zh": (TTS_BASE_ID, "chinese", "中文"),
+    "ja": (TTS_BASE_ID, "japanese", "日本語"),
+    "ko": (TTS_BASE_ID, "korean", "한국어"),
+}
+WHISPER_LANG = {"ru": "russian", "en": "english", "kk": "kazakh", "de": "german", "fr": "french",
+                "es": "spanish", "it": "italian", "pt": "portuguese", "zh": "chinese",
+                "ja": "japanese", "ko": "korean"}
+
+Log = Callable[[str], None]
+
+
+def torch_info() -> str:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            p = torch.cuda.get_device_properties(0)
+            return f"{p.name}, {p.total_memory / 2**30:.0f} GB, CUDA {torch.version.cuda}, torch {torch.__version__}"
+        return f"CPU (CUDA недоступна), torch {torch.__version__}"
+    except Exception as e:  # noqa: BLE001
+        return f"torch: {e}"
+
+
+def free_gpu():
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def ensure_downloaded(repo_id: str, log: Log):
+    """Скачивает модель с Hugging Face при первом запуске (с прогрессом в журнал)."""
+    from huggingface_hub import snapshot_download
+    log(f"Модель {repo_id}: проверяю/скачиваю…")
+    path = snapshot_download(repo_id)
+    log(f"Модель {repo_id}: готова")
+    return path
+
+
+# ---------------- Whisper ----------------
+class Whisper:
+    def __init__(self, log: Log):
+        import torch
+        from transformers import pipeline
+        ensure_downloaded(WHISPER_ID, log)
+        cuda = torch.cuda.is_available()
+        dt = torch.float16 if cuda else torch.float32
+        dev = "cuda:0" if cuda else "cpu"
+        try:
+            self.pipe = pipeline("automatic-speech-recognition", model=WHISPER_ID, dtype=dt, device=dev)
+        except TypeError:
+            self.pipe = pipeline("automatic-speech-recognition", model=WHISPER_ID, torch_dtype=dt, device=dev)
+
+    def words(self, audio: np.ndarray, sr: int, lang: str) -> list[tuple[str, float, float]]:
+        x16 = dsp.resample(audio, sr, 16000)
+        out = self.pipe(
+            {"raw": x16, "sampling_rate": 16000},
+            return_timestamps="word",
+            chunk_length_s=30,
+            batch_size=8,
+            generate_kwargs={"language": WHISPER_LANG.get(lang, lang), "task": "transcribe"},
+        )
+        dur = len(x16) / 16000
+        res = []
+        for ch in out.get("chunks", []):
+            s, e = ch["timestamp"]
+            if s is None:
+                continue
+            e = e if e is not None else min(dur, s + 0.4)
+            res.append((ch["text"], float(s), float(e)))
+        return res
+
+    def text(self, audio: np.ndarray, sr: int, lang: str) -> str:
+        x16 = dsp.resample(audio, sr, 16000)
+        out = self.pipe({"raw": x16, "sampling_rate": 16000},
+                        generate_kwargs={"language": WHISPER_LANG.get(lang, lang), "task": "transcribe"})
+        return out["text"].strip()
+
+    def close(self):
+        del self.pipe
+        free_gpu()
+
+
+# ---------------- Qwen3-TTS ----------------
+def _import_qwen():
+    try:
+        from qwen_tts import Qwen3TTSModel
+    except ImportError:
+        from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
+    return Qwen3TTSModel
+
+
+class TTS:
+    """Обёртка над qwen-tts. RTX 20xx не поддерживает bf16 и flash-attn,
+    поэтому fp16 + штатное внимание PyTorch (sdpa), при сбое — fp32/eager."""
+
+    def __init__(self, repo_id: str, log: Log, precision: str = "fp16"):
+        import torch
+        self.repo_id = repo_id
+        self.log = log
+        ensure_downloaded(repo_id, log)
+        Model = _import_qwen()
+        cuda = torch.cuda.is_available()
+        dtype = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}[precision]
+        if not cuda:
+            dtype = torch.float32
+        self.precision = precision if cuda else "fp32"
+        last = None
+        for attn in ("sdpa", "eager"):
+            try:
+                self.model = Model.from_pretrained(repo_id, device_map="cuda:0" if cuda else "cpu",
+                                                   dtype=dtype, attn_implementation=attn)
+                log(f"{repo_id}: {self.precision}, attention={attn}")
+                break
+            except Exception as e:  # noqa: BLE001
+                last = e
+        else:
+            raise RuntimeError(f"Не удалось загрузить {repo_id}: {last}")
+        try:
+            self.model.model.eval()
+        except Exception:  # noqa: BLE001
+            pass
+        self._prompt = None
+        self._prompt_key = None
+        self._batch_ok = None
+        sig = inspect.signature(self.model.generate_voice_clone)
+        self._accepts = set(sig.parameters)
+        self._var_kw = any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values())
+
+    def set_reference(self, ref_audio_24k: np.ndarray, ref_text: str):
+        key = (len(ref_audio_24k), ref_text)
+        if key == self._prompt_key:
+            return
+        self._prompt = self.model.create_voice_clone_prompt(
+            ref_audio=(ref_audio_24k.astype(np.float32), 24000), ref_text=ref_text,
+            x_vector_only_mode=False)
+        self._prompt_key = key
+
+    def _kw(self, **kw):
+        if self._var_kw:
+            return kw
+        return {k: v for k, v in kw.items() if k in self._accepts}
+
+    def _call(self, text, language, temperature, max_seconds):
+        last = None
+        for lang in (language, language.capitalize()):
+            lg = [lang] * len(text) if isinstance(text, list) else lang
+            kw = self._kw(text=text, language=lg, voice_clone_prompt=self._prompt,
+                          non_streaming_mode=True, do_sample=True, temperature=temperature,
+                          top_k=50, top_p=1.0, repetition_penalty=1.05,
+                          max_new_tokens=int(max_seconds * 12.5) + 24)
+            try:
+                return self.model.generate_voice_clone(**kw)
+            except (ValueError, KeyError, AssertionError) as e:
+                last = e
+        raise last
+
+    def generate(self, texts: list[str], language: str, temperature: float = 0.8,
+                 max_seconds: float = 30.0) -> tuple[list[np.ndarray], int]:
+        try:
+            if self._batch_ok is False:
+                raise NotImplementedError
+            wavs, sr = self._call(list(texts), language, temperature, max_seconds)
+            wavs = list(wavs)
+            if len(wavs) != len(texts):
+                raise ValueError("batch size mismatch")
+        except FloatingPointError:
+            raise
+        except Exception as e:  # noqa: BLE001 — пакетный режим не поддержан: по одной
+            if self._batch_ok is None:
+                self.log(f"пакетный синтез недоступен ({type(e).__name__}), генерирую по одной")
+            self._batch_ok = False
+            wavs, sr = [], 24000
+            for t in texts:
+                w, sr = self._call(t, language, temperature, max_seconds)
+                wavs.append(w[0] if isinstance(w, (list, tuple)) else w)
+        out = []
+        for w in wavs:
+            w = np.asarray(w, dtype=np.float32).reshape(-1)
+            if not np.all(np.isfinite(w)) or float(np.max(np.abs(w), initial=0)) < 1e-4:
+                raise FloatingPointError("NaN или тишина в синтезе")
+            out.append(w)
+        return out, int(sr)
+
+    def close(self):
+        del self.model
+        self._prompt = None
+        free_gpu()

@@ -1,0 +1,15 @@
+# torch/torchaudio ставятся под видеокарту автоматически (uv --torch-backend auto)
+torch
+torchaudio
+qwen-tts
+transformers
+accelerate
+huggingface_hub
+PySide6
+sounddevice
+soundfile
+numpy
+scipy
+librosa
+noisereduce
+pyloudnorm

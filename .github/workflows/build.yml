@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download uv
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip -OutFile uv.zip
+          Expand-Archive uv.zip -DestinationPath uvtmp
+          Copy-Item (Get-ChildItem uvtmp -Recurse -Filter uv.exe | Select-Object -First 1).FullName installer\uv.exe
+          installer\uv.exe --version
+
+      - name: Self-test (CPU, без моделей)
+        shell: pwsh
+        run: |
+          installer\uv.exe venv .venv --python 3.12
+          installer\uv.exe pip install --python .venv\Scripts\python.exe --torch-backend cpu -r requirements.txt
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:GOLOS_SHOTS = "$PWD\shots"
+          .venv\Scripts\python.exe -m golos.selftest
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: shots/
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { (Select-String -Path golos\__init__.py -Pattern '__version__ = "(.+)"').Matches[0].Groups[1].Value }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc "/DAppVersion=$ver" installer\golos.iss
+          Get-ChildItem dist
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Golos-Setup
+          path: dist/*.exe
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
