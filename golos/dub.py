@@ -53,7 +53,11 @@ class Dubber:
         return self.p.translations.get(lang, {})
 
     def run(self, langs: list[str], n_variants: int = 3, verify: bool = True,
-            only_ids: dict[str, set[int]] | None = None, temperature: float = 0.8):
+            only_ids: dict[str, set[int]] | None = None, temperature: float = 0.8,
+            replace_variant: tuple[str, int, int] | None = None):
+        """replace_variant=(язык, id фразы, № варианта) — пересоздать только один вариант."""
+        if replace_variant:
+            only_ids = {replace_variant[0]: {replace_variant[1]}}
         phrases = {ph.id: ph for ph in self.p.phrases()}
         from . import voices
         voice = voices.get(self.p.voice)
@@ -72,6 +76,9 @@ class Dubber:
                 t = texts.get(pid, "").strip()
                 d = existing.get(pid)
                 if d is None or d.text != t or d.voice != voice.id:
+                    if d is not None and replace_variant and pid == replace_variant[1]:
+                        self.log(f"[{lang}] фраза {pid}: текст или голос изменились — пересоздаю все варианты")
+                        replace_variant = None
                     d = DubPhrase(id=pid, text=t, voice=voice.id)
                 lst.append(d)
             self.p.dub[lang] = lst
@@ -79,7 +86,8 @@ class Dubber:
                 want = only_ids is None or d.id in only_ids.get(lang, set())
                 if d.text and want:
                     jobs.append((lang, d))
-        total = len(jobs) * n_variants
+        single = replace_variant is not None
+        total = 1 if single else len(jobs) * n_variants
         done = 0
         precision = self.precision
         for repo, model_langs in by_model.items():
@@ -94,8 +102,9 @@ class Dubber:
                         return
                     slot = phrases[d.id].dur
                     lname = TTS_LANGS[lang][1]
+                    n = 1 if single else n_variants
                     try:
-                        wavs, sr = tts.generate([d.text] * n_variants, lname, temperature,
+                        wavs, sr = tts.generate([d.text] * n, lname, temperature,
                                                 max_seconds=max(6.0, slot * 2.5))
                     except (FloatingPointError, RuntimeError) as e:
                         if tts.precision == "fp32":
@@ -105,34 +114,48 @@ class Dubber:
                         precision = "fp32"
                         tts = TTS(repo, self.log, "fp32")
                         tts.set_reference(ref_audio, ref_text)
-                        wavs, sr = tts.generate([d.text] * n_variants, lname, temperature,
+                        wavs, sr = tts.generate([d.text] * n, lname, temperature,
                                                 max_seconds=max(6.0, slot * 2.5))
-                    d.variants = []
+                    new = []
                     for vi, w in enumerate(wavs):
                         w = trim_silence(dsp.resample(w, sr, OUT_SR), OUT_SR)
-                        f = self.p.dub_dir(lang) / f"p{d.id:03d}_v{vi + 1}_{int(time.time())}.wav"
+                        f = self.p.dub_dir(lang) / f"p{d.id:03d}_v{vi + 1}_{int(time.time() * 1000)}.wav"
                         _write(f, w)
-                        d.variants.append(Variant(file=f.name, dur=len(w) / OUT_SR))
+                        new.append(Variant(file=f.name, dur=len(w) / OUT_SR))
                         done += 1
                         self.progress(done, total)
-                    d.chosen = -1
-                    self.log(f"[{lang}] фраза {d.id}: {len(wavs)} вар.")
+                    if single:
+                        k = replace_variant[2]
+                        if 0 <= k < len(d.variants):
+                            d.variants[k] = new[0]
+                        else:
+                            d.variants.append(new[0])
+                        self.log(f"[{lang}] фраза {d.id}: вариант {k + 1} пересоздан")
+                    else:
+                        d.variants = new
+                        d.chosen = -1
+                        self.log(f"[{lang}] фраза {d.id}: {len(new)} вар.")
+                    d.slot = round(slot, 3)
                     self.p.save()
             finally:
                 tts.close()
         if verify and jobs:
-            self.verify([j for j in jobs])
-        for lang, d in jobs:
-            self.auto_choose(d, phrases[d.id].dur)
+            only = {replace_variant[2]} if single else None
+            self.verify(jobs, only)
+        if not single:
+            for lang, d in jobs:
+                self.auto_choose(d, phrases[d.id].dur)
         self.p.save()
 
-    def verify(self, jobs):
+    def verify(self, jobs, only_variants: set[int] | None = None):
         self.log("Проверяю варианты распознаванием (ищу пропуски и «галлюцинации»)…")
         wh = Whisper(self.log)
         try:
             import soundfile as sf
             for lang, d in jobs:
-                for v in d.variants:
+                for vi, v in enumerate(d.variants):
+                    if only_variants is not None and vi not in only_variants:
+                        continue
                     if self.cancelled():
                         return
                     x, sr = sf.read(str(self.p.dub_dir(lang) / v.file), dtype="float32")

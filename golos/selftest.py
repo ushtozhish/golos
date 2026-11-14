@@ -73,6 +73,12 @@ def main():
         w.p.dub["en"].append(DubPhrase(id=x.id, text=w.p.translations["en"][x.id], voice=w.p.voice,
                                        variants=[Variant(file=f.name, dur=x.dur)], chosen=0))
     w.refresh_dub_view(); w.tabs.setCurrentIndex(1); app.processEvents()
+    w.table.item(0, 1).setText("2.5")                      # своя длительность фразы 1
+    assert abs(w.p.phrases()[0].dur - 2.5) < 1e-6, w.p.phrases()[0].dur
+    app.processEvents()
+    for i in range(30):
+        w.log(f"проверка прокрутки {i}")
+    sb = w.logbox.verticalScrollBar(); assert sb.value() == sb.maximum()
     w.grab().save(str(tmp / "dub.png"))
     z = exporter.export_package(w.p, ["en"], w.log)
     assert z.exists()

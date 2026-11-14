@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QMimeData
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QIcon, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QComboBox, QProgressBar, QFileDialog, QMessageBox, QPlainTextEdit, QDockWidget,
@@ -452,6 +452,8 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.itemChanged.connect(self.on_table_edit)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.row_menu)
         v.addWidget(self.table, 1)
         self.reload_voices()
         return w
@@ -488,6 +490,8 @@ class MainWindow(QMainWindow):
     # ================= общее =================
     def log(self, msg: str):
         self.logbox.appendPlainText(time.strftime("%H:%M:%S ") + msg)
+        sb = self.logbox.verticalScrollBar()
+        sb.setValue(sb.maximum())          # журнал всегда показывает последнее событие
 
     def show_hotkeys(self):
         rows = "".join(f"<tr><td><b>{k}</b>&nbsp;&nbsp;</td><td>{T(ru, en)}</td></tr>" for k, ru, en in HOTKEYS)
@@ -1107,7 +1111,13 @@ class MainWindow(QMainWindow):
         for r, ph in enumerate(phrases):
             it = QTableWidgetItem(str(ph.id)); it.setFlags(ro); it.setData(Qt.UserRole, ph.id)
             self.table.setItem(r, 0, it)
-            it = QTableWidgetItem(f"{ph.dur:.1f}s"); it.setFlags(ro); self.table.setItem(r, 1, it)
+            it = QTableWidgetItem(f"{ph.dur:.1f}s")
+            if ph.id in self.p.dur_override:
+                it.setForeground(QColor("#8fd48f"))
+                it.setToolTip(T("Длительность задана вручную (правый клик — сбросить)", "Manual duration (right-click to reset)"))
+            else:
+                it.setToolTip(T("Двойной клик — задать длительность, например 3.5", "Double-click to set duration, e.g. 3.5"))
+            self.table.setItem(r, 1, it)
             self.table.setItem(r, 2, QTableWidgetItem(ph.text))
             it = QTableWidgetItem(texts.get(ph.id, "") if not src else T("(как в оригинале)", "(same as original)"))
             if src:
@@ -1130,11 +1140,15 @@ class MainWindow(QMainWindow):
                         tip += T(f"\nРасхождение с текстом: {vv.cer * 100:.0f}%", f"\nText mismatch: {vv.cer * 100:.0f}%")
                     b.setToolTip(tip)
                     b.clicked.connect(lambda _=False, L=lang, pid=ph.id, k=vi: self.pick_variant(L, pid, k))
+                    b.setContextMenuPolicy(Qt.CustomContextMenu)
+                    b.customContextMenuRequested.connect(
+                        lambda pos, btn=b, L=lang, pid=ph.id, k=vi: self.variant_menu(btn, pos, L, pid, k))
                     hl.addWidget(b)
                 if d.chosen >= 0:
                     n_chosen += 1
                     n_long += fit_status(d.variants[d.chosen], ph.dur) == "long"
-                stale = d.text != (ph.text if src else texts.get(ph.id, "")) or d.voice != self.p.voice
+                stale = d.text != (ph.text if src else texts.get(ph.id, "")) or d.voice != self.p.voice or \
+                    (d.slot > 0 and abs(d.slot - ph.dur) > 0.05)
                 if stale:
                     lbl = QLabel(T("устарело", "outdated")); lbl.setStyleSheet("color:#ffb300"); hl.addWidget(lbl)
             else:
@@ -1148,7 +1162,16 @@ class MainWindow(QMainWindow):
     def on_table_edit(self, item: QTableWidgetItem):
         lang = self.view_lang.currentData()
         pid = self.table.item(item.row(), 0).data(Qt.UserRole)
-        if item.column() == 2:
+        if item.column() == 1:
+            import re as _re
+            m = _re.search(r"\d+(?:[.,]\d+)?", item.text())
+            if m and 0.2 <= float(m.group().replace(",", ".")) <= 120:
+                self.p.dur_override[pid] = round(float(m.group().replace(",", ".")), 2)
+                self.log(T(f"Фраза {pid}: длительность {self.p.dur_override[pid]} с — перегенерируйте её (правый клик)",
+                           f"Phrase {pid}: duration {self.p.dur_override[pid]} s — regenerate it (right-click)"))
+            else:
+                self.log(T("Длительность: введите число секунд, например 3.5", "Duration: enter seconds, e.g. 3.5"))
+        elif item.column() == 2:
             self.p.phrase_texts[pid] = item.text().strip()
         elif item.column() == 3 and lang != self.p.source_lang:
             self.p.translations.setdefault(lang, {})[pid] = item.text().strip()
@@ -1156,6 +1179,50 @@ class MainWindow(QMainWindow):
             return
         self.p.save()
         QTimer.singleShot(0, self.fill_dub_table)
+
+    def variant_menu(self, btn, pos, lang: str, pid: int, k: int):
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        a1 = m.addAction(T(f"Перегенерировать вариант {k + 1}", f"Regenerate variant {k + 1}"))
+        a2 = m.addAction(T("Перегенерировать всю фразу", "Regenerate the whole phrase"))
+        m.addSeparator()
+        a3 = m.addAction(T(f"Удалить вариант {k + 1}", f"Delete variant {k + 1}"))
+        act = m.exec(btn.mapToGlobal(pos))
+        if act == a1:
+            self.run_dub(None, ask=False, replace_variant=(lang, pid, k))
+        elif act == a2:
+            self.run_dub({lang: {pid}}, ask=False)
+        elif act == a3:
+            d = next((x for x in self.p.dub.get(lang, []) if x.id == pid), None)
+            if d and 0 <= k < len(d.variants):
+                d.variants.pop(k)
+                if d.chosen == k:
+                    d.chosen = 0 if d.variants else -1
+                elif d.chosen > k:
+                    d.chosen -= 1
+                self.p.save(); self.fill_dub_table()
+
+    def row_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        lang = self.view_lang.currentData()
+        it = self.table.itemAt(pos)
+        if not lang or it is None:
+            return
+        pid = self.table.item(it.row(), 0).data(Qt.UserRole)
+        rows = sorted({i.row() for i in self.table.selectedIndexes()} | {it.row()})
+        ids = {self.table.item(r, 0).data(Qt.UserRole) for r in rows}
+        m = QMenu(self)
+        a1 = m.addAction(T(f"Перегенерировать фразу {pid}", f"Regenerate phrase {pid}") if len(ids) == 1 else
+                         T(f"Перегенерировать выделенные фразы ({len(ids)})", f"Regenerate selected phrases ({len(ids)})"))
+        a2 = m.addAction(T("Сбросить длительность", "Reset duration"))
+        a2.setEnabled(any(i in self.p.dur_override for i in ids))
+        act = m.exec(self.table.viewport().mapToGlobal(pos))
+        if act == a1:
+            self.run_dub({lang: ids}, ask=False)
+        elif act == a2:
+            for i in ids:
+                self.p.dur_override.pop(i, None)
+            self.p.save(); self.fill_dub_table()
 
     def pick_variant(self, lang: str, pid: int, k: int):
         d = next((x for x in self.p.dub.get(lang, []) if x.id == pid), None)
@@ -1169,10 +1236,14 @@ class MainWindow(QMainWindow):
         self.play_mode = "variant"
         self.fill_dub_table()
 
-    def run_dub(self, only_ids, ask: bool = True):
+    def run_dub(self, only_ids, ask: bool = True, replace_variant=None):
         if not self.p or not self.p.words:
             return
         langs = self.selected_langs()
+        if replace_variant:
+            langs = [replace_variant[0]]
+        elif only_ids:
+            langs = [l for l in langs if l in only_ids]
         missing = [l for l in langs if l != self.p.source_lang and not self.p.translations.get(l)]
         if missing and only_ids is None:
             if ask and QMessageBox.question(
@@ -1192,7 +1263,7 @@ class MainWindow(QMainWindow):
 
         def job(task: Task):
             Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec).run(
-                langs, nv, ver, only_ids, temp)
+                langs, nv, ver, only_ids, temp, replace_variant)
 
         def done(_):
             self.refresh_dub_view()

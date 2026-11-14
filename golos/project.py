@@ -64,6 +64,7 @@ class DubPhrase:
     variants: list[Variant] = field(default_factory=list)
     chosen: int = -1
     voice: str = ""
+    slot: float = 0.0       # длительность фразы, под которую генерировали
 
 
 def norm_text(s: str) -> str:
@@ -89,6 +90,7 @@ class Project:
         self.translations: dict[str, dict[int, str]] = {}
         self.phrase_texts: dict[int, str] = {}   # исправленный вручную текст фраз
         self.split_after: list[int] = []         # индексы слов, после которых фраза кончается (из вставленного текста)
+        self.dur_override: dict[int, float] = {}  # длительность фразы, заданная вручную
         self.dub: dict[str, list[DubPhrase]] = {}
         self.voice = "me"                        # id голоса из библиотеки
         self.from_srt = False                    # проект открыт из SRT (звука начитки нет)
@@ -183,7 +185,8 @@ class Project:
             "translations": {k: {str(i): t for i, t in v.items()} for k, v in self.translations.items()},
             "phrase_texts": {str(k): v for k, v in self.phrase_texts.items()},
             "split_after": self.split_after,
-            "dub": {k: [{"id": d.id, "text": d.text, "chosen": d.chosen, "voice": d.voice,
+            "dur_override": {str(k): v for k, v in self.dur_override.items()},
+            "dub": {k: [{"id": d.id, "text": d.text, "chosen": d.chosen, "voice": d.voice, "slot": d.slot,
                          "variants": [asdict(v) for v in d.variants]} for d in v]
                     for k, v in self.dub.items()},
             "voice": self.voice,
@@ -203,10 +206,11 @@ class Project:
         self.translations = {k: {int(i): t for i, t in v.items()} for k, v in s.get("translations", {}).items()}
         self.phrase_texts = {int(k): v for k, v in s.get("phrase_texts", {}).items()}
         self.split_after = list(s.get("split_after", []))
+        self.dur_override = {int(k): float(v) for k, v in s.get("dur_override", {}).items()}
         self.dub = {}
         for k, lst in s.get("dub", {}).items():
             self.dub[k] = [DubPhrase(id=d["id"], text=d["text"], chosen=d.get("chosen", -1),
-                                     voice=d.get("voice", ""),
+                                     voice=d.get("voice", ""), slot=d.get("slot", 0.0),
                                      variants=[Variant(**v) for v in d.get("variants", [])]) for d in lst]
         self.voice = s.get("voice", "me")
         self.from_srt = bool(s.get("from_srt", False))
@@ -422,6 +426,7 @@ class Project:
         if old != new:
             self.phrase_texts = {}
             self.split_after = []
+            self.dur_override = {}
         self.save()
 
     def load_cues(self, cues) -> int:
@@ -487,8 +492,9 @@ class Project:
             text = " ".join(w.text.strip() for w in ws)
             text = re.sub(r"\s+([,.!?…:;])", r"\1", text)
             pid = len(out) + 1
-            out.append(Phrase(id=pid, text=self.phrase_texts.get(pid, text),
-                              start=max(0.0, ws[0].start - 0.03), end=ws[-1].end + 0.03))
+            st = max(0.0, ws[0].start - 0.03)
+            en = st + self.dur_override[pid] if pid in self.dur_override else ws[-1].end + 0.03
+            out.append(Phrase(id=pid, text=self.phrase_texts.get(pid, text), start=st, end=en))
         return out
 
     def apply_script(self, script: str) -> int:
