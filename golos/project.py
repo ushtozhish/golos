@@ -88,6 +88,7 @@ class Project:
         self.source_lang = "ru"
         self.translations: dict[str, dict[int, str]] = {}
         self.phrase_texts: dict[int, str] = {}   # исправленный вручную текст фраз
+        self.split_after: list[int] = []         # индексы слов, после которых фраза кончается (из вставленного текста)
         self.dub: dict[str, list[DubPhrase]] = {}
         self.voice = "me"                        # id голоса из библиотеки
         self._rms: np.ndarray | None = None
@@ -180,6 +181,7 @@ class Project:
             "edit": asdict(self.edit),
             "translations": {k: {str(i): t for i, t in v.items()} for k, v in self.translations.items()},
             "phrase_texts": {str(k): v for k, v in self.phrase_texts.items()},
+            "split_after": self.split_after,
             "dub": {k: [{"id": d.id, "text": d.text, "chosen": d.chosen, "voice": d.voice,
                          "variants": [asdict(v) for v in d.variants]} for d in v]
                     for k, v in self.dub.items()},
@@ -198,6 +200,7 @@ class Project:
         self.edit = e
         self.translations = {k: {int(i): t for i, t in v.items()} for k, v in s.get("translations", {}).items()}
         self.phrase_texts = {int(k): v for k, v in s.get("phrase_texts", {}).items()}
+        self.split_after = list(s.get("split_after", []))
         self.dub = {}
         for k, lst in s.get("dub", {}).items():
             self.dub[k] = [DubPhrase(id=d["id"], text=d["text"], chosen=d.get("chosen", -1),
@@ -415,72 +418,104 @@ class Project:
         new = {ph.id: ph.text for ph in self.phrases()}
         if old != new:
             self.phrase_texts = {}
+            self.split_after = []
         self.save()
 
     # ---------- фразы ----------
+    MAX_PHRASE = 12.0   # длиннее — делим по самой длинной паузе внутри
+
+    def word_groups(self) -> list[list[int]]:
+        """Слова, сгруппированные во фразы: по точкам, паузам > 0,9 с, границам из вставленного текста;
+        фразы длиннее MAX_PHRASE делятся по самой длинной внутренней паузе."""
+        cut = set(self.split_after)
+        groups, cur = [], []
+        for i, w in enumerate(self.words):
+            if cur:
+                prev = cur[-1]
+                by_text = bool(cut) and prev in cut
+                by_punct = not cut and ends_sentence(self.words[prev].text)
+                if by_text or by_punct or w.start - self.words[prev].end > 0.9:
+                    groups.append(cur); cur = []
+            cur.append(i)
+        if cur:
+            groups.append(cur)
+        out = []
+        stack = list(reversed(groups))
+        while stack:
+            g = stack.pop()
+            dur = self.words[g[-1]].end - self.words[g[0]].start
+            if dur <= self.MAX_PHRASE or len(g) < 4:
+                out.append(g); continue
+            # лучшая точка деления: длинная пауза, ближе к середине, желательно после запятой
+            best, score = None, -1.0
+            for k in range(1, len(g)):
+                gap = self.words[g[k]].start - self.words[g[k - 1]].end
+                t = self.words[g[k]].start - self.words[g[0]].start
+                mid = 1.0 - abs(t / dur - 0.5)
+                comma = 0.15 if self.words[g[k - 1]].text.rstrip().endswith((",", ";", ":", "—")) else 0.0
+                sc = gap + 0.25 * mid + comma
+                if sc > score:
+                    best, score = k, sc
+            stack.append(g[best:]); stack.append(g[:best])
+        return out
+
     def phrases(self) -> list[Phrase]:
         out: list[Phrase] = []
-        cur: list[Word] = []
-
-        def flush():
-            if not cur:
-                return
-            text = " ".join(w.text.strip() for w in cur)
+        for g in self.word_groups():
+            ws = [self.words[i] for i in g]
+            text = " ".join(w.text.strip() for w in ws)
             text = re.sub(r"\s+([,.!?…:;])", r"\1", text)
             pid = len(out) + 1
             out.append(Phrase(id=pid, text=self.phrase_texts.get(pid, text),
-                              start=max(0.0, cur[0].start - 0.03), end=cur[-1].end + 0.03))
-
-        for w in self.words:
-            if cur and (ends_sentence(cur[-1].text) or w.start - cur[-1].end > 0.9):
-                flush(); cur = []
-            cur.append(w)
-        flush()
+                              start=max(0.0, ws[0].start - 0.03), end=ws[-1].end + 0.03))
         return out
 
     def apply_script(self, script: str) -> int:
-        """Раскладывает вставленный пользователем текст по распознанным фразам.
-        Слова распознавания выравниваются со словами текста; каждая фраза получает
-        кусок текста между своим первым и последним совпавшим словом. Возвращает число фраз."""
+        """Ваш текст вместо распознанного. Слова распознавания выравниваются со словами текста;
+        фразы режутся по предложениям вашего текста, каждая фраза получает свой кусок текста."""
         from difflib import SequenceMatcher
         sw = script.split()
         if not sw or not self.words:
             return 0
+        n = len(self.words)
         a = [norm_text(w.text) for w in self.words]
         b = [norm_text(w) for w in sw]
         amap: dict[int, int] = {}
         for blk in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
             for k in range(blk.size):
                 amap[blk.a + k] = blk.b + k
-        # границы фраз в индексах слов распознавания
-        groups, cur = [], []
-        for i, w in enumerate(self.words):
-            if cur and (ends_sentence(self.words[cur[-1]].text) or w.start - self.words[cur[-1]].end > 0.9):
-                groups.append(cur); cur = []
-            cur.append(i)
-        if cur:
-            groups.append(cur)
-        # для каждой фразы — индекс начала её куска в тексте (интерполяция, если слова не совпали)
-        n = len(self.words)
         known = sorted(amap.items())
 
-        def b_at(i: int) -> float:
-            if i in amap:
-                return amap[i]
-            lo = max(((x, y) for x, y in known if x < i), default=(-1, -1))
-            hi = min(((x, y) for x, y in known if x > i), default=(n, len(sw)))
+        def b_of(i: float) -> float:          # слово распознавания → позиция в тексте
+            lo = max(((x, y) for x, y in known if x <= i), default=(-1, -1))
+            hi = min(((x, y) for x, y in known if x >= i), default=(n, len(sw)))
+            if lo[0] == hi[0]:
+                return lo[1]
             return lo[1] + (hi[1] - lo[1]) * (i - lo[0]) / max(1, hi[0] - lo[0])
 
-        starts = [0] + [int(round(b_at(g[0]))) for g in groups[1:]]
-        # сдвиг начала к ближайшей границе предложения в тексте (±3 слова)
-        for k in range(1, len(starts)):
-            best = starts[k]
-            for d in (0, -1, 1, -2, 2, -3, 3):
-                j = starts[k] + d
-                if 0 < j < len(sw) and re.search(r"[.!?…]\W*$", sw[j - 1]):
-                    best = j
+        def a_of(j: int) -> int:              # позиция в тексте → слово распознавания (последнее до неё)
+            best = None
+            for x, y in known:
+                if y <= j:
+                    best = x
+            if best is not None:
+                return best
+            return int(round(j * n / max(1, len(sw))))
+
+        # 1) границы фраз — концы предложений вашего текста
+        ends = [j for j, w in enumerate(sw) if re.search(r"[.!?…]\W*$", w)]
+        self.split_after = sorted({min(n - 1, max(0, a_of(j))) for j in ends if j < len(sw) - 1})
+        groups = self.word_groups()
+        # 2) кусок текста для каждой фразы
+        starts = [0]
+        for g in groups[1:]:
+            j = int(round(b_of(g[0])))
+            for d in (0, -1, 1, -2, 2, -3, 3):     # к ближайшему концу предложения/запятой
+                jj = j + d
+                if 0 < jj < len(sw) and re.search(r"[.!?…,;:—]\W*$", sw[jj - 1]):
+                    j = jj
                     break
-            starts[k] = max(starts[k - 1] + 1 if starts[k - 1] < len(sw) else starts[k - 1], best)
+            starts.append(min(len(sw), max(starts[-1] + 1, j)))
         starts.append(len(sw))
         self.phrase_texts = {}
         for k in range(len(groups)):
