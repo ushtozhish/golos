@@ -65,7 +65,7 @@ def main():
                                        variants=[Variant(file=f.name, dur=x.dur)], chosen=0))
     w.refresh_dub_view(); w.tabs.setCurrentIndex(1); app.processEvents()
     w.grab().save(str(tmp / "dub.png"))
-    z = exporter.export_package(w.p, ["en"])
+    z = exporter.export_package(w.p, ["en"], w.log)
     assert z.exists()
     w.copy_file(z)
     w.tabs.setCurrentIndex(2); app.processEvents()

@@ -51,7 +51,7 @@ def export_source(p: Project, folder: Path) -> tuple[Path, list[dict]]:
     return base.with_suffix(".wav"), items
 
 
-def export_package(p: Project, langs: list[str], log=print) -> Path:
+def export_package(p: Project, langs: list[str], log=lambda m: None) -> Path:
     stamp = time.strftime("%Y-%m-%d_%H-%M")
     folder = p.folder / "export" / stamp
     folder.mkdir(parents=True, exist_ok=True)

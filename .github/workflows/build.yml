@@ -29,12 +29,13 @@ jobs:
           installer\uv.exe venv .venv --python 3.12
           installer\uv.exe pip install --python .venv\Scripts\python.exe --torch-backend cpu -r requirements.txt
           $env:QT_QPA_PLATFORM = "offscreen"
+          $env:PYTHONUTF8 = "1"
           $env:GOLOS_SHOTS = "$PWD\shots"
           .venv\Scripts\python.exe -m golos.selftest
 
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: screenshots
           path: shots/
@@ -49,7 +50,7 @@ jobs:
           Get-ChildItem dist
 
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Golos-Setup
           path: dist/*.exe
