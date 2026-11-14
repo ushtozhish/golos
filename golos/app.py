@@ -206,6 +206,7 @@ class MainWindow(QMainWindow):
         for text, key, fn in [
             (T("Новый", "New"), QKeySequence.New, self.new_project),
             (T("Открыть…", "Open…"), QKeySequence.Open, self.open_dialog),
+            (T("Открыть SRT…", "Open SRT…"), None, self.open_srt),
             (T("Импорт аудио…", "Import audio…"), None, self.import_audio),
             (T("Папка проекта", "Project folder"), None, self.open_folder),
             (T("Настройки", "Settings"), None, self.settings),
@@ -397,7 +398,7 @@ class MainWindow(QMainWindow):
         g2 = QGroupBox(T("Перевод через чат с Claude", "Translate via Claude chat")); f = QVBoxLayout(g2)
         self.ctx = QLineEdit(); self.ctx.setPlaceholderText(T("О чём ролик (необязательно)", "What the video is about (optional)"))
         self.ctx.setText(self.s.value("ctx", ""))
-        self.copy_req_btn = QPushButton(T("Скопировать запрос ещё раз", "Copy request again"))
+        self.copy_req_btn = QPushButton(T("Скопировать запрос на перевод", "Copy translation request"))
         self.copy_req_btn.clicked.connect(self.copy_request)
         self.paste_btn = QPushButton(T("Вставить перевод из буфера", "Paste translation from clipboard"))
         self.paste_btn.clicked.connect(self.paste_translation)
@@ -606,6 +607,44 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, str(e)); return
         self.set_project(self.p)
         self.log(T("Импортировано: ", "Imported: ") + f)
+
+    def open_srt(self):
+        """SRT с оригинальным текстом и таймкодами → озвучка по этому таймингу."""
+        from . import media
+        f, _ = QFileDialog.getOpenFileName(self, T("Субтитры с оригинальным текстом", "Subtitles with the original text"),
+                                           "", "SRT (*.srt)")
+        if not f:
+            return
+        try:
+            raw = media.read_srt(f)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, str(e)); return
+        if not raw:
+            QMessageBox.warning(self, APP_NAME, T("В файле нет титров.", "No cues in the file.")); return
+        cues = media.merge_to_sentences(raw)
+        self.stop_play()
+        d = base = self.root() / Path(f).stem
+        i = 2
+        while d.exists():
+            d = Path(f"{base} ({i})"); i += 1
+        p = Project.create(d)
+        p.source_lang = self.s.value("source_lang", "ru")
+        p.load_cues(cues)
+        if p.voice == "me":
+            other = [v for v in voices.list_voices() if v.kind != "me"]
+            if other:
+                p.voice = other[0].id
+        p.save()
+        self.set_project(p)
+        self.tabs.setCurrentIndex(1)
+        merged = len(raw) - len(cues)
+        self.log(T(f"Открыт SRT: {len(raw)} титров" + (f", склеено в {len(cues)} предложений" if merged else "") +
+                   ". Дальше: «Скопировать запрос» → чат → «Копировать» под ответом → «Озвучить».",
+                   f"SRT opened: {len(raw)} cues" + (f", merged into {len(cues)} sentences" if merged else "") +
+                   ". Next: Copy request → chat → Copy the answer → Generate."))
+        if p.voice == "me":
+            self.log(T("Своего голоса в библиотеке пока нет: «Новый голос…» → «Из аудиофайла» (10 с вашей записи).",
+                       "No own voice in the library yet: New voice… → From an audio file (10 s of your recording)."))
 
     # ================= запись =================
     def toggle_record(self, append: bool = False):

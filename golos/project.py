@@ -91,6 +91,7 @@ class Project:
         self.split_after: list[int] = []         # индексы слов, после которых фраза кончается (из вставленного текста)
         self.dub: dict[str, list[DubPhrase]] = {}
         self.voice = "me"                        # id голоса из библиотеки
+        self.from_srt = False                    # проект открыт из SRT (звука начитки нет)
         self._rms: np.ndarray | None = None
         self._undo: list[str] = []
         self._redo: list[str] = []
@@ -186,6 +187,7 @@ class Project:
                          "variants": [asdict(v) for v in d.variants]} for d in v]
                     for k, v in self.dub.items()},
             "voice": self.voice,
+            "from_srt": self.from_srt,
         }
 
     def _load_state(self, s: dict):
@@ -207,6 +209,7 @@ class Project:
                                      voice=d.get("voice", ""),
                                      variants=[Variant(**v) for v in d.get("variants", [])]) for d in lst]
         self.voice = s.get("voice", "me")
+        self.from_srt = bool(s.get("from_srt", False))
 
     def save(self):
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -420,6 +423,24 @@ class Project:
             self.phrase_texts = {}
             self.split_after = []
         self.save()
+
+    def load_cues(self, cues) -> int:
+        """Проект из SRT: каждый титр — готовая фраза с таймингом (текст не распознаётся)."""
+        dur = max((c.end for c in cues), default=0.0) + 1.0
+        if self.duration < dur - 1.0:
+            # звука нет или он короче субтитров — дополняем тишиной до конца последнего титра
+            pad = np.zeros(int((dur - self.duration) * SR), np.float32)
+            self.audio = np.concatenate([self.audio, pad])
+            self._rms = None
+            self._write_raw()
+        self.clips = [[0.0, self.duration]]
+        self.words = []
+        self.set_words([Word(c.text, c.start, c.end) for c in cues])
+        self.split_after = list(range(len(self.words)))
+        self.phrase_texts = {}
+        self.from_srt = True
+        self.save()
+        return len(self.words)
 
     # ---------- фразы ----------
     MAX_PHRASE = 12.0   # длиннее — делим по самой длинной паузе внутри

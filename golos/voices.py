@@ -96,7 +96,11 @@ def reference(v: Voice, project=None) -> tuple[np.ndarray, str]:
     if v.kind == "me":
         if project is None:
             raise RuntimeError("нет проекта")
-        return project.reference_clip()
+        x, text = project.reference_clip()
+        if len(x) == 0 or float(np.max(np.abs(x))) < 1e-3:
+            raise RuntimeError("В проекте нет записи вашего голоса (открыт SRT без звука) — "
+                               "выберите другой голос или откройте SRT вместе с видео/звуком начитки")
+        return x, text
     import soundfile as sf
     x, sr = sf.read(str(v.wav), dtype="float32")
     return dsp.resample(dsp.to_mono(x), sr, 24000), v.text

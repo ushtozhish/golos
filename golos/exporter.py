@@ -57,10 +57,16 @@ def export_package(p: Project, langs: list[str], log=lambda m: None) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     manifest = {"app": "Golos", "project": p.name, "created": stamp,
                 "source_lang": p.source_lang, "sample_rate": 48000, "tracks": {}}
-    _, src_items = export_source(p, folder)
-    manifest["tracks"][p.source_lang] = {"file": f"{p.source_lang}.wav", "kind": "recording",
-                                         "duration": round(p.seq_duration(), 3), "phrases": src_items}
-    log(f"{p.source_lang}: начитка экспортирована")
+    if p.from_srt:
+        items = [{"id": ph.id, "start": round(ph.start, 3), "end": round(ph.end, 3), "text": ph.text}
+                 for ph in p.phrases()]
+        write_srt(folder / f"{p.source_lang}.srt", items)
+        manifest["source_srt"] = {"file": f"{p.source_lang}.srt", "phrases": items}
+    else:
+        _, src_items = export_source(p, folder)
+        manifest["tracks"][p.source_lang] = {"file": f"{p.source_lang}.wav", "kind": "recording",
+                                             "duration": round(p.seq_duration(), 3), "phrases": src_items}
+        log(f"{p.source_lang}: начитка экспортирована")
     for lang in langs:
         if lang == p.source_lang and not p.dub.get(lang):
             continue

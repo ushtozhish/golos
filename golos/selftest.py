@@ -79,12 +79,26 @@ def main():
     w.copy_file(z)
     w.tabs.setCurrentIndex(2); app.processEvents()
     w.grab().save(str(tmp / "send.png"))
+    # проект из SRT
+    from golos import media
+    srt = tmp / "promo.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,500\nКлиент хочет видеть\n\n2\n00:00:02,600 --> 00:00:03,800\nгрейд.\n\n"
+                   "3\n00:00:05,000 --> 00:00:07,000\nGradeStream бесплатно!\n", "utf-8")
+    from PySide6.QtWidgets import QFileDialog
+    QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(srt), ""))
+    w.open_srt()
+    ph = w.p.phrases()
+    assert w.p.from_srt and len(ph) == 2 and ph[0].text == "Клиент хочет видеть грейд." and abs(ph[0].start - 0.97) < 0.05, \
+        [(x.text, x.start) for x in ph]
+    app.processEvents(); w.grab().save(str(tmp / "srt.png"))
+    z2 = exporter.export_package(w.p, [], w.log)
+    assert z2.exists()
     print("SELFTEST OK", tmp)
     out = os.environ.get("GOLOS_SHOTS")
     if out:
         import shutil
         Path(out).mkdir(parents=True, exist_ok=True)
-        for n in ("edit.png", "dub.png", "send.png"):
+        for n in ("edit.png", "dub.png", "send.png", "srt.png"):
             shutil.copy(tmp / n, Path(out) / n)
     w.close()
     # модули синтеза должны импортироваться (ловим несовместимые версии torch/torchaudio)
