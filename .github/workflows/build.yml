@@ -23,17 +23,29 @@ jobs:
           Copy-Item (Get-ChildItem uvtmp -Recurse -Filter uv.exe | Select-Object -First 1).FullName installer\uv.exe
           installer\uv.exe --version
 
+      - name: Bundle Python 3.12 (без junction-ссылок)
+        shell: pwsh
+        run: |
+          installer\uv.exe python install 3.12 --install-dir "$env:RUNNER_TEMP\pyroot"
+          $dir = Get-ChildItem "$env:RUNNER_TEMP\pyroot" -Directory |
+                 Where-Object { $_.Name -like "cpython-3.12.*" -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+                 Select-Object -First 1
+          if (-not $dir) { throw "python not found" }
+          Copy-Item $dir.FullName installer\python -Recurse
+          installer\python\python.exe --version
+          Copy-Item installer\python "$env:RUNNER_TEMP\ci-python" -Recurse
+
       - name: Self-test (CPU, без моделей)
         shell: pwsh
         run: |
-          installer\uv.exe venv .venv --python 3.12
-          installer\uv.exe pip install --python .venv\Scripts\python.exe --torch-backend cpu -r requirements.txt
+          $py = "$env:RUNNER_TEMP\ci-python\python.exe"
+          installer\uv.exe pip install --python $py --system --break-system-packages --torch-backend cpu -r requirements.txt
           $env:QT_QPA_PLATFORM = "offscreen"
           $env:PYTHONUTF8 = "1"
           $env:GOLOS_SHOTS = "$PWD\shots"
           $env:QT_QPA_FONTDIR = "C:\Windows\Fonts"
           $ErrorActionPreference = "Continue"
-          $out = .venv\Scripts\python.exe -m golos.selftest 2>&1 | Out-String
+          $out = & $py -m golos.selftest 2>&1 | Out-String
           Write-Host $out
           Write-Host "selftest exit code: $LASTEXITCODE"
           # сбой Qt/torch при выгрузке процесса после завершения проверок не считаем провалом

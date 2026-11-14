@@ -4,9 +4,7 @@ param([switch]$NoPause)
 $ErrorActionPreference = "Continue"  # uv пишет прогресс в stderr — это не ошибка
 $app = Split-Path -Parent $MyInvocation.MyCommand.Path
 $uv = Join-Path $app "uv.exe"
-$venv = Join-Path $app ".venv"
-$py = Join-Path $venv "Scripts\python.exe"
-$env:UV_PYTHON_INSTALL_DIR = Join-Path $app "python"
+$py = Join-Path $app "python\python.exe"
 $env:UV_CACHE_DIR = Join-Path $env:LOCALAPPDATA "Golos\uv-cache"
 $env:UV_LINK_MODE = "copy"
 $Host.UI.RawUI.WindowTitle = "Golos — установка компонентов"
@@ -25,19 +23,15 @@ Write-Host "Модели голоса (~8 ГБ) скачаются при пер
 Write-Host ""
 
 try {
-    if (-not (Test-Path $py)) {
-        Write-Host "[1/3] Python 3.12…" -ForegroundColor Cyan
-        & $uv venv $venv --python 3.12 --python-preference only-managed
-        if ($LASTEXITCODE -ne 0) { Fail "не удалось создать окружение Python" }
-    } else {
-        Write-Host "[1/3] Python уже установлен" -ForegroundColor Cyan
-    }
+    if (-not (Test-Path $py)) { Fail "не найден встроенный Python: $py — переустановите Golos" }
+    Write-Host "[1/3] Python: " -NoNewline -ForegroundColor Cyan; & $py --version
 
     Write-Host "[2/3] Библиотеки (PyTorch под вашу видеокарту, Qwen3-TTS, Whisper, Qt)…" -ForegroundColor Cyan
-    & $uv pip install --python $py --upgrade --torch-backend auto -r (Join-Path $app "requirements.txt")
+    $req = Join-Path $app "requirements.txt"
+    & $uv pip install --python $py --system --break-system-packages --upgrade --torch-backend auto -r $req
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Автоопределение не сработало, ставлю сборку CUDA 12.8…" -ForegroundColor Yellow
-        & $uv pip install --python $py --upgrade --torch-backend cu128 -r (Join-Path $app "requirements.txt")
+        & $uv pip install --python $py --system --break-system-packages --upgrade --torch-backend cu128 -r $req
         if ($LASTEXITCODE -ne 0) { Fail "не удалось установить библиотеки" }
     }
 

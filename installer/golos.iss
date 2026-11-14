@@ -35,16 +35,23 @@ Source: "..\golos\icon.ico"; DestDir: "{app}\golos"; Flags: ignoreversion
 Source: "..\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "setup_env.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uv.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "python\*"; DestDir: "{app}\python"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Golos"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; IconFilename: "{app}\golos\icon.ico"
+Name: "{group}\Golos"; Filename: "{app}\python\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; IconFilename: "{app}\golos\icon.ico"
 Name: "{group}\Golos — обновить компоненты"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup_env.ps1"""; WorkingDir: "{app}"
 Name: "{group}\{cm:UninstallProgram,Golos}"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\Golos"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; IconFilename: "{app}\golos\icon.ico"; Tasks: desktopicon
+Name: "{userdesktop}\Golos"; Filename: "{app}\python\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; IconFilename: "{app}\golos\icon.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup_env.ps1"""; WorkingDir: "{app}"; StatusMsg: "Скачиваю и устанавливаю компоненты (3–4 ГБ, несколько минут)…"; Flags: waituntilterminated
-Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,Golos}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\python\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,Golos}"; Flags: nowait postinstall skipifsilent
+
+[InstallDelete]
+; остатки неудачной установки 0.2.0 (Python от uv с junction-ссылками)
+Type: filesandordirs; Name: "{app}\.venv"
+Type: filesandordirs; Name: "{app}\python\cpython-*"
+Type: files; Name: "{app}\python\.lock"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\.venv"
