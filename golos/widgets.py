@@ -5,7 +5,8 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import (QPainter, QColor, QPen, QFont, QTextCharFormat, QTextCursor,
                            QBrush, QFontMetrics, QCursor)
-from PySide6.QtWidgets import QWidget, QTextEdit, QScrollBar, QVBoxLayout
+from PySide6.QtWidgets import (QWidget, QTextEdit, QScrollBar, QVBoxLayout, QTableWidget, QTableWidgetItem,
+                               QHeaderView, QAbstractItemView, QLabel)
 
 from .project import Project, SR, ends_sentence
 from .i18n import T
@@ -329,62 +330,92 @@ class TimelinePanel(QWidget):
         lay.addWidget(self.bar)
 
 
-class TextPanel(QTextEdit):
-    """Распознанный текст смонтированной дорожки. Клик по слову — перейти к нему."""
+class PhraseEditor(QTableWidget):
+    """Распознанный текст по фразам. Текст фразы можно исправить (двойной клик или F2).
+    Одинарный клик — перейти к фразе на дорожке."""
     seek = Signal(float)
+    text_edited = Signal(int, str)      # id фразы, новый текст
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setReadOnly(True)
-        f = self.font(); f.setPointSizeF(12); self.setFont(f)
-        self.spans: list[tuple[int, int, int]] = []
+        super().__init__(0, 3, parent)
+        self.setHorizontalHeaderLabels(["#", T("Время", "Time"),
+                                        T("Текст — исправьте ошибки распознавания (двойной клик)",
+                                          "Text — fix recognition errors (double-click)")])
+        h = self.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.verticalHeader().setVisible(False)
+        self.setWordWrap(True)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        f = self.font(); f.setPointSizeF(11.5); self.setFont(f)
         self.p: Project | None = None
+        self.phr = []
+        self._cur = -1
+        self.cellClicked.connect(self._clicked)
+        self.itemChanged.connect(self._changed)
+        self.note = QLabel(self)
+        self.note.setWordWrap(True)
+        self.note.setAlignment(Qt.AlignCenter)
+        self.note.setStyleSheet("color:#999;background:transparent;padding:20px")
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.note.setGeometry(0, 30, self.viewport().width(), 120)
 
     def set_project(self, p):
         self.p = p
         self.rebuild()
 
     def rebuild(self):
-        self.clear(); self.spans = []
-        if not self.p or not self.p.words:
-            self.setPlaceholderText(T("Текст появится после «Распознать» или «Отправить на перевод». "
-                                      "Монтируйте на слух — текст не обязателен.",
-                                      "Text appears after Recognize or Send to translation. "
-                                      "Edit by ear — the text is optional."))
+        self.blockSignals(True)
+        self.setRowCount(0)
+        self.phr = self.p.phrases() if self.p and self.p.words else []
+        if not self.phr:
+            self.note.setText(T("Текст появится после «Распознать текст». Монтировать можно на слух — "
+                                "текст нужен для перевода и переозвучки.",
+                                "Text appears after «Recognize text». You can edit by ear — "
+                                "text is needed for translation and re-voicing."))
+            self.note.show()
+            self.blockSignals(False)
             return
-        cur = self.textCursor()
         stale = not self.p.words_fresh
-        fmt = QTextCharFormat(); fmt.setForeground(QColor("#7a7a7a" if stale else "#e8e8e8"))
-        if stale:
-            note = QTextCharFormat(); note.setForeground(QColor("#ffb300"))
-            cur.insertText(T("Монтаж изменился — текст обновится при отправке.\n\n",
-                             "Edit changed — text will refresh on send.\n\n"), note)
-        for i, w in enumerate(self.p.words):
-            p0 = cur.position()
-            cur.insertText(w.text.strip(), fmt)
-            self.spans.append((p0, cur.position(), i))
-            cur.insertText("\n" if ends_sentence(w.text) else " ", QTextCharFormat())
+        self.note.setText(T("Монтаж изменился после распознавания — нажмите «Распознать текст» ещё раз.",
+                            "Edit changed after recognition — press «Recognize text» again.") if stale else "")
+        self.note.setVisible(stale)
+        self.setRowCount(len(self.phr))
+        ro = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        for r, ph in enumerate(self.phr):
+            it = QTableWidgetItem(str(ph.id)); it.setFlags(ro); self.setItem(r, 0, it)
+            m, sec = divmod(ph.start, 60)
+            it = QTableWidgetItem(f"{int(m)}:{sec:04.1f}"); it.setFlags(ro); self.setItem(r, 1, it)
+            it = QTableWidgetItem(ph.text)
+            if ph.id in self.p.phrase_texts:
+                it.setForeground(QColor("#8fd48f"))
+                it.setToolTip(T("Исправлено вами", "Edited by you"))
+            if stale:
+                it.setFlags(ro); it.setForeground(QColor("#777"))
+            self.setItem(r, 2, it)
+        self.resizeRowsToContents()
+        self.blockSignals(False)
 
-    def mouseReleaseEvent(self, e):
-        super().mouseReleaseEvent(e)
-        if self.p and self.p.words_fresh and not self.textCursor().hasSelection():
-            c = self.cursorForPosition(e.position().toPoint()).position()
-            for p0, p1, i in self.spans:
-                if p0 <= c <= p1:
-                    self.seek.emit(self.p.words[i].start)
-                    break
+    def _clicked(self, r, c):
+        if 0 <= r < len(self.phr):
+            self.seek.emit(self.phr[r].start)
+
+    def _changed(self, item):
+        if item.column() == 2 and 0 <= item.row() < len(self.phr):
+            self.text_edited.emit(self.phr[item.row()].id, item.text().strip())
 
     def highlight(self, t: float):
-        if not self.p or not self.p.words_fresh:
-            self.setExtraSelections([]); return
-        i = next((k for k, w in enumerate(self.p.words) if w.start <= t <= w.end + 0.05), None)
-        sel = []
-        if i is not None and i < len(self.spans):
-            p0, p1, _ = self.spans[i]
-            s = QTextEdit.ExtraSelection()
-            c = QTextCursor(self.document()); c.setPosition(p0); c.setPosition(p1, QTextCursor.KeepAnchor)
-            s.cursor = c
-            fmt = QTextCharFormat(); fmt.setBackground(QBrush(QColor(255, 204, 51, 90)))
-            s.format = fmt
-            sel.append(s)
-        self.setExtraSelections(sel)
+        if not self.phr:
+            return
+        r = next((k for k, ph in enumerate(self.phr) if ph.start <= t <= ph.end + 0.3), -1)
+        if r != self._cur and r >= 0 and self.state() != QAbstractItemView.EditingState:
+            self._cur = r
+            self.blockSignals(True)
+            self.selectRow(r)
+            self.blockSignals(False)
+            self.scrollToItem(self.item(r, 2))

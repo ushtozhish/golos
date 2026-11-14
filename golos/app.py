@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from . import __version__, APP_NAME
 from .i18n import T, set_lang
 from .project import Project, Word, SR, new_project_dir
-from .widgets import TimelinePanel, TextPanel
+from .widgets import TimelinePanel, PhraseEditor
 from .workers import Task
 from . import audio_io, bridge, models, voices
 
@@ -313,7 +313,8 @@ class MainWindow(QMainWindow):
         split.addWidget(top)
 
         bottom = QWidget(); bl = QHBoxLayout(bottom); bl.setContentsMargins(0, 0, 0, 0)
-        self.text = TextPanel(); self.text.seek.connect(self.on_seek)
+        self.text = PhraseEditor(); self.text.seek.connect(self.on_seek)
+        self.text.text_edited.connect(self.on_phrase_edited)
         bl.addWidget(self.text, 3)
 
         side = QVBoxLayout()
@@ -335,11 +336,12 @@ class MainWindow(QMainWindow):
             wdg.valueChanged.connect(self.on_edit_settings)
         rb = QPushButton(T("Вернуть исходную запись целиком", "Restore the whole original"))
         rb.clicked.connect(self.restore_all); side.addWidget(rb)
-        self.asr_btn = QPushButton(T("Распознать текст (для проверки)", "Recognize text (to check)"))
+        self.asr_btn = QPushButton(T("① Распознать текст", "① Recognize text"))
         self.asr_btn.clicked.connect(lambda: self.run_asr(None))
         side.addWidget(self.asr_btn)
         side.addStretch(1)
-        self.send_btn = QPushButton(T("Отправить на перевод  →", "Send to translation  →"))
+        self.send_btn = QPushButton(T("② Текст проверен — отправить на перевод  →",
+                                      "② Text checked — send to translation  →"))
         self.send_btn.setStyleSheet("QPushButton{background:#2f6fd0;color:white;font-weight:bold;padding:12px}")
         self.send_btn.clicked.connect(self.send_to_translation)
         side.addWidget(self.send_btn)
@@ -806,7 +808,10 @@ class MainWindow(QMainWindow):
                 self.log(T("Монтаж изменился во время распознавания — повторите.", "Edit changed during recognition — retry."))
                 return
             self.p.set_words([Word(t, s, e) for t, s, e in words])
-            self.log(T(f"Распознано фраз: {len(self.p.phrases())}", f"Phrases: {len(self.p.phrases())}"))
+            self.log(T(f"Распознано фраз: {len(self.p.phrases())}. Проверьте текст и исправьте ошибки "
+                       f"(двойной клик по фразе), затем «② Отправить на перевод».",
+                       f"Phrases: {len(self.p.phrases())}. Check the text, fix errors (double-click), "
+                       f"then «② Send to translation»."))
             self.text.rebuild(); self.tl.view.update(); self.refresh_dub_view()
             if then:
                 QTimer.singleShot(0, then)
@@ -814,11 +819,29 @@ class MainWindow(QMainWindow):
         self.start_task(job, done)
 
     def send_to_translation(self):
-        """Распознать (если нужно) → запрос на перевод в буфер → вкладка 2."""
-        def after():
-            self.copy_request()
-            self.tabs.setCurrentIndex(1)
-        self.run_asr(after)
+        """Если текст ещё не распознан по текущему монтажу — распознаём и даём его проверить.
+        Если распознан — запрос (с вашими исправлениями) в буфер и вкладка 2."""
+        if not self.p or not self.p.clips:
+            return
+        if not self.p.words_fresh:
+            self.log(T("Сначала распознаю текст. Проверьте и исправьте его в списке фраз, "
+                       "затем нажмите «② Отправить на перевод» ещё раз.",
+                       "Recognizing first. Check and fix the phrases, then press «② Send» again."))
+            self.run_asr(None)
+            return
+        self.copy_request()
+        self.tabs.setCurrentIndex(1)
+
+    def on_phrase_edited(self, pid: int, text: str):
+        if not self.p:
+            return
+        orig = {ph.id: ph.text for ph in self.p.phrases()}
+        self.p.phrase_texts[pid] = text
+        self.p.save()
+        if orig.get(pid) != text:
+            self.log(T(f"Фраза {pid} исправлена", f"Phrase {pid} edited"))
+        QTimer.singleShot(0, self.text.rebuild)
+        self.fill_dub_table()
 
     # ================= перевод =================
     def selected_langs(self) -> list[str]:
