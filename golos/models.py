@@ -98,13 +98,41 @@ def free_gpu():
         pass
 
 
-def ensure_downloaded(repo_id: str, log: Log):
-    """Скачивает модель с Hugging Face при первом запуске (с прогрессом в журнал)."""
+def models_dir():
+    """Папка моделей программы: %LOCALAPPDATA%\\Golos\\models (обычные файлы, без символических ссылок —
+    Windows без режима разработчика не даёт их создавать, ошибка WinError 1314)."""
+    import os
+    from pathlib import Path
+    base = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Golos" / "models"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _no_symlinks():
+    """Страховка: если какая-то модель докачивает файлы в общий кэш Hugging Face
+    (например, вспомогательный токенизатор), кэш тоже должен обходиться без символических ссылок."""
+    try:
+        import huggingface_hub.file_download as fd
+        fd.are_symlinks_supported = lambda *a, **k: False
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_no_symlinks()
+
+
+def ensure_downloaded(repo_id: str, log: Log) -> str:
+    """Скачивает модель с Hugging Face (при первом запуске) и возвращает путь к её папке."""
     from huggingface_hub import snapshot_download
-    log(f"Модель {repo_id}: проверяю/скачиваю…")
-    path = snapshot_download(repo_id)
+    target = models_dir() / repo_id.replace("/", "--")
+    done = target / ".golos_complete"
+    if done.exists():
+        return str(target)
+    log(f"Модель {repo_id}: скачиваю (один раз)…")
+    snapshot_download(repo_id, local_dir=str(target))
+    done.write_text("ok")
     log(f"Модель {repo_id}: готова")
-    return path
+    return str(target)
 
 
 # ---------------- Whisper ----------------
@@ -114,16 +142,16 @@ class Whisper:
         import torch
         from transformers import pipeline
         self.log = log
-        ensure_downloaded(WHISPER_ID, log)
+        path = ensure_downloaded(WHISPER_ID, log)
         setup_torch(log)
         t0 = time.time()
         cuda = torch.cuda.is_available()
         dt = torch.float16 if cuda else torch.float32
         dev = "cuda:0" if cuda else "cpu"
         try:
-            self.pipe = pipeline("automatic-speech-recognition", model=WHISPER_ID, dtype=dt, device=dev)
+            self.pipe = pipeline("automatic-speech-recognition", model=path, dtype=dt, device=dev)
         except TypeError:
-            self.pipe = pipeline("automatic-speech-recognition", model=WHISPER_ID, torch_dtype=dt, device=dev)
+            self.pipe = pipeline("automatic-speech-recognition", model=path, torch_dtype=dt, device=dev)
         log(f"Whisper загружен за {time.time() - t0:.1f} с")
 
     def words(self, audio: np.ndarray, sr: int, lang: str) -> list[tuple[str, float, float]]:
@@ -181,7 +209,7 @@ class TTS:
         import torch
         self.repo_id = repo_id
         self.log = log
-        ensure_downloaded(repo_id, log)
+        path = ensure_downloaded(repo_id, log)
         setup_torch(log)
         Model = _import_qwen()
         cuda = torch.cuda.is_available()
@@ -192,7 +220,7 @@ class TTS:
         last = None
         for attn in ("sdpa", "eager"):
             try:
-                self.model = Model.from_pretrained(repo_id, device_map="cuda:0" if cuda else "cpu",
+                self.model = Model.from_pretrained(path, device_map="cuda:0" if cuda else "cpu",
                                                    dtype=dtype, attn_implementation=attn)
                 log(f"{repo_id}: {self.precision}, attention={attn}")
                 break
