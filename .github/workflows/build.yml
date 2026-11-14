@@ -38,6 +38,19 @@ jobs:
           if ($code -ne 0) { exit $code }
           exit 0
 
+      - name: Publish screenshots to ci-shots branch
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Test-Path shots)) { exit 0 }
+          git config user.name "golos-ci"; git config user.email "ci@users.noreply.github.com"
+          $tmp = Join-Path $env:RUNNER_TEMP "shots-repo"
+          git init -q $tmp
+          Copy-Item shots\* $tmp
+          git -C $tmp add -A
+          git -C $tmp -c user.name="golos-ci" -c user.email="ci@users.noreply.github.com" commit -qm "shots ${{ github.sha }}"
+          git -C $tmp push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:ci-shots
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v5
