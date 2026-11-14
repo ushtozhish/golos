@@ -78,6 +78,16 @@ def main():
         for n in ("edit.png", "dub.png", "send.png"):
             shutil.copy(tmp / n, Path(out) / n)
     w.close()
+    # модули синтеза должны импортироваться (ловим несовместимые версии torch/torchaudio)
+    import importlib
+    for m in ("torch", "torchaudio", "transformers", "librosa", "noisereduce", "pyloudnorm", "qwen_tts"):
+        mod = importlib.import_module(m)
+        print("import ok:", m, getattr(mod, "__version__", ""))
+    from golos import models  # noqa: F401
+    from golos.models import _import_qwen
+    print("Qwen3TTSModel:", _import_qwen().__name__)
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
