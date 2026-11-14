@@ -52,6 +52,42 @@ def torch_info() -> str:
         return f"torch: {e}"
 
 
+_SETUP_DONE = False
+
+
+def setup_torch(log: Log | None = None) -> str:
+    """Один раз: потолок видеопамяти (чтобы не уходить в общую память и не вешать экран)
+    и ограничение потоков процессора (чтобы мышь и окна оставались живыми)."""
+    global _SETUP_DONE
+    import os
+    import torch
+    if not _SETUP_DONE:
+        torch.set_num_threads(max(1, (os.cpu_count() or 4) - 2))
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.set_per_process_memory_fraction(0.85, 0)
+            except Exception:  # noqa: BLE001
+                pass
+        _SETUP_DONE = True
+    if torch.cuda.is_available():
+        dev = f"видеокарта {torch.cuda.get_device_name(0)}"
+    else:
+        dev = "ПРОЦЕССОР (видеокарта не используется — будет медленно)"
+    if log:
+        log(f"Вычисления: {dev}")
+    return dev
+
+
+def vram_used() -> str:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return f"{torch.cuda.max_memory_allocated() / 2**30:.1f} ГБ"
+    except Exception:  # noqa: BLE001
+        pass
+    return "-"
+
+
 def free_gpu():
     gc.collect()
     try:
@@ -74,9 +110,13 @@ def ensure_downloaded(repo_id: str, log: Log):
 # ---------------- Whisper ----------------
 class Whisper:
     def __init__(self, log: Log):
+        import time
         import torch
         from transformers import pipeline
+        self.log = log
         ensure_downloaded(WHISPER_ID, log)
+        setup_torch(log)
+        t0 = time.time()
         cuda = torch.cuda.is_available()
         dt = torch.float16 if cuda else torch.float32
         dev = "cuda:0" if cuda else "cpu"
@@ -84,16 +124,23 @@ class Whisper:
             self.pipe = pipeline("automatic-speech-recognition", model=WHISPER_ID, dtype=dt, device=dev)
         except TypeError:
             self.pipe = pipeline("automatic-speech-recognition", model=WHISPER_ID, torch_dtype=dt, device=dev)
+        log(f"Whisper загружен за {time.time() - t0:.1f} с")
 
     def words(self, audio: np.ndarray, sr: int, lang: str) -> list[tuple[str, float, float]]:
+        import time
+        import torch
         x16 = dsp.resample(audio, sr, 16000)
-        out = self.pipe(
-            {"raw": x16, "sampling_rate": 16000},
-            return_timestamps="word",
-            chunk_length_s=30,
-            batch_size=8,
-            generate_kwargs={"language": WHISPER_LANG.get(lang, lang), "task": "transcribe"},
-        )
+        t0 = time.time()
+        # batch_size=1: расчёт тайминга слов хранит матрицы внимания — пачкой они не влезают в 8 ГБ
+        with torch.inference_mode():
+            out = self.pipe(
+                {"raw": x16, "sampling_rate": 16000},
+                return_timestamps="word",
+                chunk_length_s=30,
+                batch_size=1,
+                generate_kwargs={"language": WHISPER_LANG.get(lang, lang), "task": "transcribe"},
+            )
+        self.log(f"Распознано {len(x16) / 16000:.0f} с звука за {time.time() - t0:.1f} с, видеопамять: {vram_used()}")
         dur = len(x16) / 16000
         res = []
         for ch in out.get("chunks", []):
@@ -106,7 +153,9 @@ class Whisper:
 
     def text(self, audio: np.ndarray, sr: int, lang: str) -> str:
         x16 = dsp.resample(audio, sr, 16000)
-        out = self.pipe({"raw": x16, "sampling_rate": 16000},
+        import torch
+        with torch.inference_mode():
+            out = self.pipe({"raw": x16, "sampling_rate": 16000},
                         generate_kwargs={"language": WHISPER_LANG.get(lang, lang), "task": "transcribe"})
         return out["text"].strip()
 
@@ -133,6 +182,7 @@ class TTS:
         self.repo_id = repo_id
         self.log = log
         ensure_downloaded(repo_id, log)
+        setup_torch(log)
         Model = _import_qwen()
         cuda = torch.cuda.is_available()
         dtype = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}[precision]
@@ -184,7 +234,9 @@ class TTS:
                           top_k=50, top_p=1.0, repetition_penalty=1.05,
                           max_new_tokens=int(max_seconds * 12.5) + 24)
             try:
-                return self.model.generate_voice_clone(**kw)
+                import torch
+                with torch.inference_mode():
+                    return self.model.generate_voice_clone(**kw)
             except (ValueError, KeyError, AssertionError) as e:
                 last = e
         raise last

@@ -17,6 +17,9 @@ class Task(QThread):
         self.fn, self.args, self.kwargs = fn, args, kwargs
         self._cancel = False
 
+    def start(self, priority=QThread.LowPriority):
+        super().start(priority)
+
     def cancel(self):
         self._cancel = True
 
