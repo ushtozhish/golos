@@ -31,7 +31,12 @@ jobs:
           $env:QT_QPA_PLATFORM = "offscreen"
           $env:PYTHONUTF8 = "1"
           $env:GOLOS_SHOTS = "$PWD\shots"
+          $ErrorActionPreference = "Continue"
           .venv\Scripts\python.exe -m golos.selftest
+          $code = $LASTEXITCODE
+          Write-Host "selftest exit code: $code"
+          if ($code -ne 0) { exit $code }
+          exit 0
 
       - name: Upload screenshots
         if: always()
