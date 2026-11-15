@@ -580,7 +580,8 @@ class MainWindow(QMainWindow):
             return
         if self.tabs.currentIndex() == 3:
             route = {"R": self.train.toggle_record, "Right": self.train.next, "Left": self.train.prev,
-                     "Space": self.train.play_last}
+                     "Space": self.train.play_last, "=": lambda: self.train.set_font(2),
+                     "+": lambda: self.train.set_font(2), "-": lambda: self.train.set_font(-2)}
             if key in route:
                 route[key]()
             return

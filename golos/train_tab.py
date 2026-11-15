@@ -15,6 +15,21 @@ from .i18n import T
 from . import audio_io, trainset
 
 
+class _BigText(QLabel):
+    """Крупный текст фразы: Ctrl + колесо мыши меняет размер (запоминается для всех фраз)."""
+
+    def __init__(self, tab):
+        super().__init__()
+        self.tab = tab
+
+    def wheelEvent(self, e):
+        if e.modifiers() & Qt.ControlModifier:
+            self.tab.set_font(2 if e.angleDelta().y() > 0 else -2)
+            e.accept()
+        else:
+            super().wheelEvent(e)
+
+
 class TrainTab(QWidget):
     def __init__(self, win):
         super().__init__()
@@ -61,12 +76,27 @@ class TrainTab(QWidget):
         split.addWidget(left)
 
         right = QWidget(); rv = QVBoxLayout(right)
-        self.no_lbl = QLabel(); self.no_lbl.setStyleSheet("color:#999"); rv.addWidget(self.no_lbl)
-        self.text_lbl = QLabel(); self.text_lbl.setWordWrap(True); self.text_lbl.setAlignment(Qt.AlignCenter)
-        f = QFont(self.font()); f.setPointSizeF(22); self.text_lbl.setFont(f)
-        self.text_lbl.setMinimumHeight(150)
+        top = QHBoxLayout()
+        self.no_lbl = QLabel(); self.no_lbl.setStyleSheet("color:#999"); top.addWidget(self.no_lbl, 1)
+        self.how_btn = QPushButton(T("Как записывать", "How to record")); self.how_btn.clicked.connect(self.show_tips)
+        top.addWidget(self.how_btn)
+        top.addWidget(QLabel(T("Размер текста:", "Text size:")))
+        self.fs_minus = QToolButton(); self.fs_minus.setText("A−"); self.fs_minus.clicked.connect(lambda: self.set_font(-2))
+        self.fs_plus = QToolButton(); self.fs_plus.setText("A+"); self.fs_plus.clicked.connect(lambda: self.set_font(+2))
+        self.fs_lbl = QLabel()
+        for w in (self.fs_minus, self.fs_lbl, self.fs_plus):
+            top.addWidget(w)
+        rv.addLayout(top)
+        self.how_lbl = QLabel(); self.how_lbl.setWordWrap(True)
+        self.how_lbl.setStyleSheet("background:#1d2a22;color:#cfe8d6;border-left:4px solid #3fbf6f;padding:8px")
+        rv.addWidget(self.how_lbl)
+        self.text_lbl = _BigText(self); self.text_lbl.setWordWrap(True); self.text_lbl.setAlignment(Qt.AlignCenter)
+        self.text_lbl.setTextFormat(Qt.RichText)
+        self.text_lbl.setMinimumHeight(170)
         self.text_lbl.setStyleSheet("background:#15171b;color:#f2f2f2;border:1px solid #33363d;padding:16px")
-        rv.addWidget(self.text_lbl)
+        self.text_lbl.setToolTip(T("Ctrl + колесо мыши или клавиши + / − — размер текста", "Ctrl + wheel or + / − — text size"))
+        rv.addWidget(self.text_lbl, 2)
+        self.set_font(0)
         self.hint_lbl = QLabel(); self.hint_lbl.setAlignment(Qt.AlignCenter); self.hint_lbl.setStyleSheet("color:#ffcc33")
         rv.addWidget(self.hint_lbl)
         row = QHBoxLayout()
@@ -97,13 +127,31 @@ class TrainTab(QWidget):
         self.takes.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.takes.setWordWrap(True)
         rv.addWidget(self.takes, 1)
-        tip = QLabel(T("R — запись/стоп · → / ← — следующая/предыдущая фраза · пробел — послушать последний дубль. "
+        self.takes.setMinimumHeight(110)
+        tip = QLabel(T("R — запись/стоп · → / ← — следующая/предыдущая фраза · пробел — послушать последний дубль · + / − — размер текста. "
                        "Читайте каждый блок в одном настроении; паузу в 1 с до и после фразы программа обрежет сама.",
                        "R — record/stop · → / ← — next/previous · Space — play last take."))
         tip.setWordWrap(True); tip.setStyleSheet("color:#888"); rv.addWidget(tip)
         split.addWidget(right)
         split.setSizes([380, 900])
         v.addWidget(split, 1)
+
+    def set_font(self, delta):
+        size = int(self.win.s.value("train_font", 30)) + delta
+        size = max(14, min(80, size))
+        self.win.s.setValue("train_font", size)
+        f = QFont(self.font()); f.setPointSize(size); self.text_lbl.setFont(f)
+        self.fs_lbl.setText(f"{size}")
+        hf = QFont(self.font()); hf.setPointSize(max(10, size // 2)); self.hint_lbl.setFont(hf)
+
+    def show_tips(self):
+        rows = "".join(f"<tr><td style='padding:4px 12px 4px 0'><b>{a}</b></td><td style='padding:4px'>{b}</td></tr>"
+                       for a, b in trainset.GENERAL_TIPS)
+        QMessageBox.information(self, T("Как записывать", "How to record"),
+                                "<table>" + rows + "</table><p>" + T(
+                                    "Блоки А–Г — около 250 фраз, это 20–25 минут речи. Остальное до 30–60 минут "
+                                    "добирайте своими текстами (сценарии роликов, README) — модель лучше всего учится "
+                                    "на том, что вы будете озвучивать на самом деле.", "") + "</p>")
 
     # ---------------- список и фраза ----------------
     def _block_lines(self):
@@ -157,8 +205,17 @@ class TrainTab(QWidget):
             self.block.blockSignals(True); self.block.setCurrentIndex(k); self.block.blockSignals(False)
             self.fill_list()
         self.no_lbl.setText(f"{trainset.BLOCK_NAMES[l.block]} · {T('фраза', 'phrase')} {l.no} / {len(self.ts.lines)}")
-        self.text_lbl.setText(l.text)
+        import html as _h
+        t = _h.escape(l.text)
+        for w in l.emph:
+            t = t.replace(_h.escape(w), f"<span style='color:#ffcc33;text-decoration:underline'>{_h.escape(w)}</span>", 1)
+        self.text_lbl.setText(t)
         self.hint_lbl.setText(l.hint)
+        sec, how = trainset.section_of(l.no)
+        parts = [f"<b>{trainset.BLOCK_NAMES[l.block]}.</b> {trainset.BLOCK_HOW.get(l.block, '')}"]
+        if sec:
+            parts.append(f"<b>{sec}:</b> {how}")
+        self.how_lbl.setText("<br>".join(parts))
         self.fill_takes()
 
     def fill_takes(self):

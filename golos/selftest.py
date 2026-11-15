@@ -136,6 +136,9 @@ def main():
     assert len(tt.ts.lines) == 250, len(tt.ts.lines)
     assert tt.ts.by_no[103].hint and "выделить" not in tt.ts.by_no[103].text
     w.tabs.setCurrentIndex(3); app.processEvents()
+    assert tt.ts.by_no[108].emph == ["среду", "четверг"], tt.ts.by_no[108].emph
+    tt.cur = 104; tt.show_line(); tt.set_font(4); app.processEvents()
+    assert "Логическое ударение" in tt.how_lbl.text() and "#ffcc33" in tt.text_lbl.text()
     take = tt.ts.add_take(1, (np.sin(2 * np.pi * 200 * np.arange(SR * 2) / SR) * 0.3).astype(np.float32), SR)
     trainset.text_check(take, tt.ts.by_no[1].text, tt.ts.by_no[1].text)
     tt.ts.save(); tt.fill_takes(); tt.fill_list(); app.processEvents()
