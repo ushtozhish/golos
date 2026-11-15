@@ -93,10 +93,9 @@ class TrainTab(QWidget):
         self.text_lbl = _BigText(self); self.text_lbl.setWordWrap(True); self.text_lbl.setAlignment(Qt.AlignCenter)
         self.text_lbl.setTextFormat(Qt.RichText)
         self.text_lbl.setMinimumHeight(170)
-        self.text_lbl.setStyleSheet("background:#15171b;color:#f2f2f2;border:1px solid #33363d;padding:16px")
         self.text_lbl.setToolTip(T("Ctrl + колесо мыши или клавиши + / − — размер текста", "Ctrl + wheel or + / − — text size"))
         rv.addWidget(self.text_lbl, 2)
-        self.hint_lbl = QLabel(); self.hint_lbl.setAlignment(Qt.AlignCenter); self.hint_lbl.setStyleSheet("color:#ffcc33")
+        self.hint_lbl = QLabel(); self.hint_lbl.setAlignment(Qt.AlignCenter)
         rv.addWidget(self.hint_lbl)
         self.set_font(0)
         row = QHBoxLayout()
@@ -140,9 +139,11 @@ class TrainTab(QWidget):
         size = int(self.win.s.value("train_font", 30)) + delta
         size = max(14, min(80, size))
         self.win.s.setValue("train_font", size)
-        f = QFont(self.font()); f.setPointSize(size); self.text_lbl.setFont(f)
+        # размер задаём в собственном стиле поля: общий стиль программы (font-size:10pt) перебивает setFont
+        self.text_lbl.setStyleSheet(f"QLabel{{background:#15171b;color:#f2f2f2;border:1px solid #33363d;"
+                                    f"padding:16px;font-size:{size}pt}}")
+        self.hint_lbl.setStyleSheet(f"QLabel{{color:#ffcc33;font-size:{max(10, size // 2)}pt}}")
         self.fs_lbl.setText(f"{size}")
-        hf = QFont(self.font()); hf.setPointSize(max(10, size // 2)); self.hint_lbl.setFont(hf)
 
     def show_tips(self):
         rows = "".join(f"<tr><td style='padding:4px 12px 4px 0'><b>{a}</b></td><td style='padding:4px'>{b}</td></tr>"
