@@ -91,7 +91,7 @@ class SettingsDialog(QDialog):
         self.mmode = QComboBox()
         for m_ in stress.MIXED_MODES:
             self.mmode.addItem(stress.MIXED_NAMES[m_], m_)
-        self.mmode.setCurrentIndex(max(0, self.mmode.findData(s.value("mixed_mode", "split"))))
+        self.mmode.setCurrentIndex(max(0, self.mmode.findData(s.value("mixed_mode", "auto"))))
         f.addRow(T("Английские слова в русской фразе", "English words in Russian phrases"), self.mmode)
         pd = QPushButton(T("Открыть словарь произношения", "Open pronunciation dictionary"))
         pd.clicked.connect(lambda: (stress.pron_path().exists() or stress.pron_path().write_text("{}", "utf-8"),
@@ -1796,7 +1796,7 @@ class MainWindow(QMainWindow):
 
     def test_mixed(self, pid: int):
         self._ab_test(pid, T("Как лучше читать английские слова?", "How to read the English words?"),
-                      stress.MIXED_MODES, stress.MIXED_NAMES, "mixed_mode", "split", "mixed_test")
+                      stress.MIXED_MODES, stress.MIXED_NAMES, "mixed_mode", "auto", "mixed_test")
 
     def _ab_test(self, pid, title, modes, names, key, default, method):
         """Окно открывается сразу; каждый способ становится доступен, как только готов."""
@@ -1806,7 +1806,7 @@ class MainWindow(QMainWindow):
         import soundfile as sf
         from .dub import Dubber
         p, prec, text = self.p, self.s.value("precision", "fp16"), ph.text
-        smode, mmode = self.s.value("stress_mode", "acute"), self.s.value("mixed_mode", "split")
+        smode, mmode = self.s.value("stress_mode", "acute"), self.s.value("mixed_mode", "auto")
         dlg = QDialog(self); dlg.setWindowTitle(title); dlg.setModal(False)
         v = QVBoxLayout(dlg)
         v.addWidget(QLabel(T("Варианты появляются по мере готовности. Послушайте и выберите лучший — "
@@ -1901,7 +1901,7 @@ class MainWindow(QMainWindow):
         p, nv, ver, temp = self.p, self.sp_var.value(), self.cb_verify.isChecked(), self.sp_temp.value()
         prec = self.s.value("precision", "fp16")
         smode = self.s.value("stress_mode", "acute")
-        mmode = self.s.value("mixed_mode", "split")
+        mmode = self.s.value("mixed_mode", "auto")
 
         def job(task: Task):
             Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec, smode, mmode).run(

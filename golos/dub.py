@@ -39,7 +39,7 @@ class Dubber:
     def __init__(self, project: Project, log: Callable[[str], None],
                  progress: Callable[[int, int], None] = lambda a, b: None,
                  cancelled: Callable[[], bool] = lambda: False,
-                 precision: str = "fp16", stress_mode: str = "acute", mixed_mode: str = "split"):
+                 precision: str = "fp16", stress_mode: str = "acute", mixed_mode: str = "auto"):
         self.p = project
         self.log = log
         self.progress = progress
