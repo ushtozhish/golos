@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QMimeData
+from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QMimeData, QItemSelectionModel
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QIcon, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -378,11 +378,12 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self); self.timer.timeout.connect(self._tick); self.timer.start(33)
         QApplication.clipboard().dataChanged.connect(self._clipboard_changed)
         last = self.s.value("last_project", "")
-        if self.s.value("open_last", "false") == "true" and last and Path(last, "project.json").exists():
-            try:
-                self.open_project(Path(last))
-            except Exception as e:  # noqa: BLE001
-                self.log(f"Не удалось открыть последний проект: {e}")
+        if self.s.value("open_last", "false") == "true":
+            if last and Path(last, "project.json").exists():
+                try:
+                    self.open_project(Path(last))
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"Не удалось открыть последний проект: {e}")
         else:
             QTimer.singleShot(150, self.projects_dialog)
         self._update_state()
@@ -628,7 +629,11 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel(T("Язык:", "Language:")))
         self.view_lang = QComboBox(); self.view_lang.currentIndexChanged.connect(self.fill_dub_table)
         row.addWidget(self.view_lang)
-        self.play_track_btn = QPushButton("▶ " + T("Слушать дорожку", "Play track"))
+        self.play_track_btn = QPushButton("▶ " + T("Проиграть выбранные", "Play chosen"))
+        self.play_track_btn.setToolTip(T("Выбранные варианты всех фраз подряд, по таймингу оригинала (пробел — пауза).\n"
+                                         "Выделена одна строка — с этой фразы до конца; несколько — от первой выделенной до последней.",
+                                         "Chosen variants of all phrases in sequence, on the original timing (Space — pause).\n"
+                                         "One row selected — from that phrase to the end; several — from the first to the last selected."))
         self.play_track_btn.clicked.connect(self.play_track)
         stop = QPushButton("■"); stop.clicked.connect(self.stop_play)
         self.regen_btn = QPushButton(T("Перегенерировать выделенные фразы", "Regenerate selected phrases"))
@@ -963,6 +968,8 @@ class MainWindow(QMainWindow):
             self.tl.view.set_head(t)
             self.text.highlight(t)
             self._show_pos(t)
+        elif self.player.playing and self.play_mode == "dub":
+            self._highlight_dub()
         elif self.play_mode and not self.player.playing:
             self.play_mode = None
             self.play_btn.setText("▶  (Space)")
@@ -1707,13 +1714,53 @@ class MainWindow(QMainWindow):
             return
         from .dub import build_track, OUT_SR
         try:
-            x, _, warns = build_track(self.p, lang)
+            x, timings, warns = build_track(self.p, lang)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, APP_NAME, str(e)); return
         for w in warns:
             self.log(f"[{lang}] {w}")
-        self.player.play(x, OUT_SR)
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        start, end = 0.0, len(x) / OUT_SR
+        if rows:
+            ids = {self.table.item(r, 0).data(Qt.UserRole) for r in rows}
+            sel = [t for t in timings if t["id"] in ids]
+            if sel:
+                start = max(0.0, min(t["start"] for t in sel) - 0.15)
+                if len(rows) > 1:                       # несколько строк — от первой до последней выделенной
+                    end = min(end, max(t["end"] for t in sel) + 0.3)
+                # одна строка — с этой фразы до конца
+        self.track_timings = timings
+        self.track_offset = start
+        self.player.play(x[int(start * OUT_SR): int(end * OUT_SR)], OUT_SR)
         self.play_mode = "dub"
+        self._dub_row = -1
+        n = len([t for t in timings if start <= t["start"] < end])
+        self.log(T(f"Играю {n} фраз подряд ({end - start:.1f} с). Пробел — пауза.",
+                   f"Playing {n} phrases ({end - start:.1f} s). Space — pause."))
+
+    def _highlight_dub(self):
+        t = self.track_offset + self.player.position()
+        cur = next((it["id"] for it in self.track_timings if it["start"] - 0.05 <= t <= it["end"] + 0.1), None)
+        if cur is None:
+            return
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it and it.data(Qt.UserRole) == cur:
+                if r != self._dub_row:
+                    self._dub_row = r
+                    self.table.setCurrentCell(r, 2, QItemSelectionModel.NoUpdate)
+                    for c in range(4):
+                        cell = self.table.item(r, c)
+                        if cell:
+                            cell.setBackground(QColor(255, 204, 51, 60))
+                    if hasattr(self, "_prev_dub_row") and self._prev_dub_row not in (None, r):
+                        for c in range(4):
+                            cell = self.table.item(self._prev_dub_row, c)
+                            if cell:
+                                cell.setBackground(QColor(0, 0, 0, 0))
+                    self._prev_dub_row = r
+                    self.table.scrollToItem(self.table.item(r, 2))
+                break
 
     # ================= отправка в чат =================
     def export_package(self):
