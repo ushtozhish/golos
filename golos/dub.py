@@ -55,8 +55,9 @@ class Dubber:
 
     def run(self, langs: list[str], n_variants: int = 3, verify: bool = True,
             only_ids: dict[str, set[int]] | None = None, temperature: float = 0.8,
-            replace_variant: tuple[str, int, int] | None = None):
-        """replace_variant=(язык, id фразы, № варианта) — пересоздать только один вариант."""
+            replace_variant: tuple[str, int, int] | None = None, top_up: bool = False):
+        """replace_variant=(язык, id фразы, № варианта) — пересоздать только один вариант.
+        top_up=True — «Догенерировать»: оставить имеющиеся варианты и досоздать до n_variants актуальных."""
         if replace_variant:
             only_ids = {replace_variant[0]: {replace_variant[1]}}
         phrases = {ph.id: ph for ph in self.p.phrases()}
@@ -91,7 +92,20 @@ class Dubber:
                     jobs.append((lang, d))
             self.p.dub[lang] = lst
         single = replace_variant is not None
-        total = 1 if single else len(jobs) * n_variants
+
+        def need(d) -> int:
+            if single:
+                return 1
+            if not top_up:
+                return n_variants
+            fresh = sum(1 for v in d.variants if v.text == d.text and v.voice == d.voice)
+            return max(0, n_variants - fresh)
+
+        if top_up:
+            jobs = [(lang, d) for lang, d in jobs if need(d) > 0]
+            if not jobs:
+                self.log("Догенерировать нечего: у всех фраз уже достаточно вариантов")
+        total = sum(need(d) for _, d in jobs)
         done = 0
         precision = self.precision
         for repo, model_langs in by_model.items():
@@ -106,7 +120,9 @@ class Dubber:
                         return
                     slot = phrases[d.id].dur
                     lname = TTS_LANGS[lang][1]
-                    n = 1 if single else n_variants
+                    n = need(d)
+                    if n <= 0:
+                        continue
                     from . import stress
                     mtext = stress.for_model(d.text, lang, self.stress_mode)
                     try:
@@ -137,6 +153,9 @@ class Dubber:
                         else:
                             d.variants.append(new[0])     # ★ не трогаем — новый вариант рядом
                         self.log(f"[{lang}] фраза {d.id}: вариант {k + 1} пересоздан")
+                    elif top_up:
+                        d.variants.extend(new)
+                        self.log(f"[{lang}] фраза {d.id}: догенерировано {len(new)}, всего {len(d.variants)}")
                     else:
                         keep = [v for v in d.variants if v.pinned]
                         chosen_file = d.variants[d.chosen].file if 0 <= d.chosen < len(d.variants) else None
@@ -150,9 +169,11 @@ class Dubber:
                 pass                      # модель остаётся в памяти для следующих действий
         if verify and jobs:
             only = {replace_variant[2]} if single else None
-            self.verify(jobs, only)
+            self.verify(jobs, only, skip_checked=top_up)
         if not single:
             for lang, d in jobs:
+                if top_up and 0 <= d.chosen < len(d.variants) and d.variants[d.chosen].text == d.text:
+                    continue                      # выбранный вариант остаётся выбранным
                 self.auto_choose(d, phrases[d.id].dur)
         self.p.save()
 
@@ -182,7 +203,7 @@ class Dubber:
             self.progress(i + 1, len(stress.MODES))
         return out
 
-    def verify(self, jobs, only_variants: set[int] | None = None):
+    def verify(self, jobs, only_variants: set[int] | None = None, skip_checked: bool = False):
         self.log("Проверяю варианты распознаванием (ищу пропуски и «галлюцинации»)…")
         wh = Whisper(self.log)
         try:
@@ -190,6 +211,8 @@ class Dubber:
             for lang, d in jobs:
                 for vi, v in enumerate(d.variants):
                     if only_variants is not None and vi not in only_variants:
+                        continue
+                    if skip_checked and v.cer is not None:
                         continue
                     if self.cancelled():
                         return

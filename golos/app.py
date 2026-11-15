@@ -728,7 +728,13 @@ class MainWindow(QMainWindow):
         self.dub_btn.clicked.connect(lambda: self.run_dub(None))
         f3.addRow(T("Вариантов на фразу", "Variants per phrase"), self.sp_var)
         f3.addRow(T("Живость", "Expressiveness"), self.sp_temp)
-        f3.addRow(self.cb_verify); f3.addRow(self.dub_btn)
+        self.topup_btn = QPushButton(T("Догенерировать", "Top up variants"))
+        self.topup_btn.setToolTip(T("Оставляет имеющиеся варианты и досоздаёт недостающие до «Вариантов на фразу».\n"
+                                    "Выделены строки — только для них, иначе для всех фраз.",
+                                    "Keeps existing takes and generates the missing ones up to «Variants per phrase».\n"
+                                    "Selected rows only, or all phrases."))
+        self.topup_btn.clicked.connect(self.top_up)
+        f3.addRow(self.cb_verify); f3.addRow(self.dub_btn); f3.addRow(self.topup_btn)
         top.addWidget(g3, 1)
         v.addLayout(top)
 
@@ -819,7 +825,7 @@ class MainWindow(QMainWindow):
         self.asr_btn.setEnabled(has_audio and not busy)
         self.script_btn.setEnabled(has_audio and not busy)
         self.send_btn.setEnabled(has_audio and not busy)
-        for b in (self.copy_req_btn, self.paste_btn, self.dub_btn):
+        for b in (self.copy_req_btn, self.paste_btn, self.dub_btn, self.topup_btn):
             b.setEnabled(has_words and not busy)
         self.export_btn.setEnabled(has_audio and not busy)
         self.export_src_btn.setEnabled(has_audio)
@@ -1630,6 +1636,7 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         a1 = m.addAction(T(f"Перегенерировать фразу {pid}", f"Regenerate phrase {pid}") if len(ids) == 1 else
                          T(f"Перегенерировать выделенные фразы ({len(ids)})", f"Regenerate selected phrases ({len(ids)})"))
+        a0 = m.addAction(T(f"Догенерировать до {self.sp_var.value()} вариантов", f"Top up to {self.sp_var.value()} variants"))
         a2 = m.addAction(T("Сбросить длительность", "Reset duration"))
         a2.setEnabled(any(i in self.p.dur_override for i in ids))
         a3 = m.addAction(T("Вернуть удалённые варианты (с диска)", "Recover lost variants (from disk)"))
@@ -1637,7 +1644,9 @@ class MainWindow(QMainWindow):
             m.addSeparator()
             self._stress_items(m, pid)
         act = m.exec(self.table.viewport().mapToGlobal(pos))
-        if act == a1:
+        if act == a0:
+            self.run_dub({lang: ids}, ask=False, top_up=True)
+        elif act == a1:
             self.run_dub({lang: ids}, ask=False)
         elif act == a2:
             for i in ids:
@@ -1823,7 +1832,15 @@ class MainWindow(QMainWindow):
         self.play_mode = "variant"
         self.fill_dub_table()
 
-    def run_dub(self, only_ids, ask: bool = True, replace_variant=None):
+    def top_up(self):
+        lang = self.view_lang.currentData()
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if rows and lang:
+            self.run_dub({lang: {self.table.item(r, 0).data(Qt.UserRole) for r in rows}}, ask=False, top_up=True)
+        else:
+            self.run_dub(None, ask=False, top_up=True)
+
+    def run_dub(self, only_ids, ask: bool = True, replace_variant=None, top_up: bool = False):
         if not self.p or not self.p.words:
             return
         langs = self.selected_langs()
@@ -1851,7 +1868,7 @@ class MainWindow(QMainWindow):
 
         def job(task: Task):
             Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec, smode).run(
-                langs, nv, ver, only_ids, temp, replace_variant)
+                langs, nv, ver, only_ids, temp, replace_variant, top_up)
 
         def done(_):
             self.refresh_dub_view()
