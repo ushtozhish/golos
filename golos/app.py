@@ -1189,6 +1189,7 @@ class MainWindow(QMainWindow):
         t.failed.connect(lambda m: (self.log("ОШИБКА: " + m), QMessageBox.warning(self, APP_NAME, m)))
         t.succeeded.connect(done)
         t.finished.connect(self._task_finished)
+
         self.task = t
         self.prog.setVisible(True); self.prog.setRange(0, 0); self.cancel_btn.setVisible(True)
         t.start()
@@ -1760,35 +1761,55 @@ class MainWindow(QMainWindow):
         self.start_task(job, done)
 
     def test_stress(self, pid: int):
+        """Окно открывается сразу; каждый способ становится доступен, как только готов."""
         ph = next((x for x in self.p.phrases() if x.id == pid), None)
-        if not ph:
+        if not ph or self._busy():
             return
+        import soundfile as sf
         from .dub import Dubber
         p, prec, text = self.p, self.s.value("precision", "fp16"), ph.text
+        dlg = QDialog(self); dlg.setWindowTitle(T("Какой способ ударения сработал?", "Which stress method worked?"))
+        dlg.setModal(False)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel(T("Варианты появляются по мере готовности. Послушайте и выберите тот, где ударение правильное.",
+                             "Takes appear as they are ready. Listen and pick the one with correct stress.")))
+        cur = self.s.value("stress_mode", "acute")
+        rows = {}
+        for mode in stress.MODES:
+            row = QHBoxLayout()
+            pb = QPushButton("⏳ " + stress.MODE_NAMES[mode] + T(" — готовлю…", " — generating…"))
+            pb.setEnabled(False)
+            cb = QPushButton(T("Выбрать", "Choose")); cb.setEnabled(False)
+            cb.clicked.connect(lambda _=False, mode=mode: (self.s.setValue("stress_mode", mode), dlg.accept(),
+                                                           self.log(T("Способ ударения: ", "Stress method: ") +
+                                                                    stress.MODE_NAMES[mode])))
+            row.addWidget(pb, 1); row.addWidget(cb); v.addLayout(row)
+            rows[mode] = (pb, cb)
+        dlg.show()
+
+        def on_item(item):
+            mode, f = item
+            pb, cb = rows[mode]
+            pb.setText("▶ " + stress.MODE_NAMES[mode] + (T("  (сейчас)", "  (current)") if mode == cur else ""))
+            try:
+                pb.clicked.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            pb.clicked.connect(lambda _=False, f=f: self.player.play(*sf.read(f, dtype="float32")))
+            pb.setEnabled(True); cb.setEnabled(True)
+            if mode == stress.MODES[0]:          # первый готовый — сразу проигрываем
+                self.player.play(*sf.read(f, dtype="float32"))
 
         def job(task: Task):
-            return Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec).stress_test(text)
+            return Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec).stress_test(
+                text, on_item=lambda m, f: task.item.emit((m, f)))
 
-        def done(res):
-            import soundfile as sf
-            dlg = QDialog(self); dlg.setWindowTitle(T("Какой способ ударения сработал?", "Which stress method worked?"))
-            v = QVBoxLayout(dlg)
-            v.addWidget(QLabel(T("Послушайте и выберите вариант с правильным ударением — "
-                                 "этот способ будет использоваться дальше.",
-                                 "Listen and pick the take with correct stress — this method will be used from now on.")))
-            cur = self.s.value("stress_mode", "acute")
-            for mode, f in res:
-                row = QHBoxLayout()
-                pb = QPushButton("▶ " + stress.MODE_NAMES[mode] + ("  (сейчас)" if mode == cur else ""))
-                pb.clicked.connect(lambda _=False, f=f: self.player.play(*sf.read(f, dtype="float32")))
-                cb = QPushButton(T("Выбрать", "Choose"))
-                cb.clicked.connect(lambda _=False, mode=mode: (self.s.setValue("stress_mode", mode), dlg.accept(),
-                                                               self.log(T("Способ ударения: ", "Stress method: ") +
-                                                                        stress.MODE_NAMES[mode])))
-                row.addWidget(pb, 1); row.addWidget(cb); v.addLayout(row)
-            dlg.exec()
+        def done(_):
+            pass
 
-        self.start_task(job, done)
+        if self.start_task(job, done):
+            self.task.item.connect(on_item)
+            dlg.rejected.connect(lambda: self.task and self.task.cancel())
 
     def pick_variant(self, lang: str, pid: int, k: int):
         d = next((x for x in self.p.dub.get(lang, []) if x.id == pid), None)
@@ -1951,6 +1972,10 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
 
     def closeEvent(self, e):
+        try:
+            models.release_tts()
+        except Exception:  # noqa: BLE001
+            pass
         if self.rec is not None:
             self.toggle_record()
         self.player.stop()

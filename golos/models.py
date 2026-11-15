@@ -135,6 +135,44 @@ def ensure_downloaded(repo_id: str, log: Log) -> str:
     return str(target)
 
 
+# ---------------- кэш модели синтеза ----------------
+_TTS_CACHE: dict = {"model": None}
+
+
+def get_tts(repo_id: str, log: Log, precision: str = "fp16") -> "TTS":
+    """Модель синтеза остаётся в видеопамяти между действиями — повторные генерации без 10–20 с загрузки."""
+    m = _TTS_CACHE["model"]
+    if m is not None and m.repo_id == repo_id and m.precision == precision:
+        m.log = log
+        return m
+    release_tts()
+    log("Загружаю модель голоса в видеопамять (один раз за сеанс, 10–20 с)…")
+    import time
+    t0 = time.time()
+    m = TTS(repo_id, log, precision)
+    log(f"Модель голоса загружена за {time.time() - t0:.0f} с — дальше генерация без ожидания загрузки")
+    _TTS_CACHE["model"] = m
+    return m
+
+
+def release_tts():
+    m = _TTS_CACHE["model"]
+    if m is not None:
+        _TTS_CACHE["model"] = None
+        m.close()
+
+
+def _gpu_free_gb() -> float:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free, _ = torch.cuda.mem_get_info()
+            return free / 2**30
+    except Exception:  # noqa: BLE001
+        pass
+    return 99.0
+
+
 # ---------------- Whisper ----------------
 class Whisper:
     def __init__(self, log: Log):
@@ -144,6 +182,8 @@ class Whisper:
         self.log = log
         path = ensure_downloaded(WHISPER_ID, log)
         setup_torch(log)
+        if _gpu_free_gb() < 2.5:            # не хватит места рядом с моделью синтеза — выгружаем её
+            release_tts()
         t0 = time.time()
         cuda = torch.cuda.is_available()
         dt = torch.float16 if cuda else torch.float32

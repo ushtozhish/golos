@@ -8,7 +8,7 @@ from typing import Callable
 import numpy as np
 
 from . import dsp
-from .models import TTS, TTS_LANGS, Whisper, free_gpu
+from .models import TTS, TTS_LANGS, Whisper, free_gpu, get_tts, release_tts
 from .project import Project, DubPhrase, Variant, norm_text, SR
 
 MAX_STRETCH = 1.12   # ускоряем не больше чем на 12 %
@@ -98,7 +98,7 @@ class Dubber:
             mjobs = [j for j in jobs if j[0] in model_langs]
             if not mjobs:
                 continue
-            tts = TTS(repo, self.log, precision)
+            tts = get_tts(repo, self.log, precision)
             try:
                 tts.set_reference(ref_audio, ref_text)
                 for lang, d in mjobs:
@@ -116,9 +116,9 @@ class Dubber:
                         if tts.precision == "fp32":
                             raise
                         self.log(f"fp16 дал сбой ({e}); перезагружаю модель в fp32")
-                        tts.close()
+                        release_tts()
                         precision = "fp32"
-                        tts = TTS(repo, self.log, "fp32")
+                        tts = get_tts(repo, self.log, "fp32")
                         tts.set_reference(ref_audio, ref_text)
                         wavs, sr = tts.generate([mtext] * n, lname, temperature,
                                                 max_seconds=max(6.0, slot * 2.5))
@@ -147,7 +147,7 @@ class Dubber:
                     d.slot = round(slot, 3)
                     self.p.save()
             finally:
-                tts.close()
+                pass                      # модель остаётся в памяти для следующих действий
         if verify and jobs:
             only = {replace_variant[2]} if single else None
             self.verify(jobs, only)
@@ -156,29 +156,30 @@ class Dubber:
                 self.auto_choose(d, phrases[d.id].dur)
         self.p.save()
 
-    def stress_test(self, text: str, lang: str = "ru") -> list[tuple[str, str]]:
-        """Одна фраза тремя способами передачи ударения — чтобы выбрать на слух, какой понимает модель."""
+    def stress_test(self, text: str, lang: str = "ru", on_item=None) -> list[tuple[str, str]]:
+        """Одна фраза тремя способами передачи ударения; on_item(mode, path) вызывается по мере готовности."""
         from . import stress, voices
         voice = voices.get(self.p.voice)
         ref_audio, ref_text = voices.reference(voice, self.p)
         repo, lname, _ = TTS_LANGS[lang]
-        tts = TTS(repo, self.log, self.precision)
+        tts = get_tts(repo, self.log, self.precision)
+        tts.set_reference(ref_audio, ref_text)
+        d = self.p.folder / "stress_test"
+        d.mkdir(exist_ok=True)
         out = []
-        try:
-            tts.set_reference(ref_audio, ref_text)
-            d = self.p.folder / "stress_test"
-            d.mkdir(exist_ok=True)
-            for i, mode in enumerate(stress.MODES):
-                mtext = stress.for_model(text, lang, mode)
-                self.log(f"Ударение, способ «{stress.MODE_NAMES[mode]}»: {mtext}")
-                wavs, sr = tts.generate([mtext], lname, 0.6, max_seconds=20)
-                w = trim_silence(dsp.resample(wavs[0], sr, OUT_SR), OUT_SR)
-                f = d / f"{mode}_{int(time.time() * 1000)}.wav"
-                _write(f, w)
-                out.append((mode, str(f)))
-                self.progress(i + 1, len(stress.MODES))
-        finally:
-            tts.close()
+        for i, mode in enumerate(stress.MODES):
+            if self.cancelled():
+                break
+            mtext = stress.for_model(text, lang, mode)
+            self.log(f"Ударение, способ «{stress.MODE_NAMES[mode]}»: {mtext}")
+            wavs, sr = tts.generate([mtext], lname, 0.6, max_seconds=20)
+            w = trim_silence(dsp.resample(wavs[0], sr, OUT_SR), OUT_SR)
+            f = d / f"{mode}_{int(time.time() * 1000)}.wav"
+            _write(f, w)
+            out.append((mode, str(f)))
+            if on_item:
+                on_item(mode, str(f))
+            self.progress(i + 1, len(stress.MODES))
         return out
 
     def verify(self, jobs, only_variants: set[int] | None = None):

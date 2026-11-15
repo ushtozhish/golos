@@ -11,6 +11,7 @@ class Task(QThread):
     progress = Signal(int, int)
     failed = Signal(str)
     succeeded = Signal(object)
+    item = Signal(object)          # промежуточный результат (например, готовый вариант)
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
