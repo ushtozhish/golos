@@ -532,6 +532,9 @@ class MainWindow(QMainWindow):
                 self.recent_menu.aboutToShow.connect(self._fill_recent)
                 tb.addWidget(self.recent_btn)
         self.title_lbl = QLabel(); tb.addSeparator(); tb.addWidget(self.title_lbl)
+        self.title_lbl.setStyleSheet("QLabel{color:#9aa0a8;background:transparent;padding-left:8px}")
+        self.title_lbl.setToolTip(T("Открытый проект (вкладки 1–3). Записи для обучения голоса (вкладка 4) "
+                                    "общие и от проекта не зависят.", "Open project (tabs 1–3)."))
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_edit_tab(), T("1. Запись и монтаж", "1. Record & edit"))
@@ -855,7 +858,8 @@ class MainWindow(QMainWindow):
         self.export_src_btn.setEnabled(has_audio)
         self.copy_zip_btn.setEnabled(self.last_zip is not None)
         self.open_exp_btn.setEnabled(self.last_zip is not None)
-        self.title_lbl.setText(f"  {self.p.name}" if has else T("  нет проекта", "  no project"))
+        self.title_lbl.setText(T("Открыт проект: ", "Project: ") + self.p.name if has
+                               else T("Проект не открыт", "No project open"))
         if has and len(self.p.audio):
             self.stats.setText(T("Записано ", "Recorded ") + fmt_time(self.p.duration) + "  →  " +
                                T("на дорожке ", "on track ") + fmt_time(self.p.seq_duration()) +
