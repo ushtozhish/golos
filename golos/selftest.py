@@ -114,6 +114,18 @@ def main():
     app.processEvents(); w.grab().save(str(tmp / "srt.png"))
     z2 = exporter.export_package(w.p, [], w.log)
     assert z2.exists()
+    # ударение по записи / клику
+    from golos.app import StressWordDialog
+    sd = StressWordDialog(w, "замок", "Замок висит", 0)
+    sd.pick(1); assert sd.result() == "зам+ок", sd.result()
+    sr_ = 48000
+    def _syl(dur, amp):
+        tt = np.arange(int(sr_ * dur)) / sr_
+        return (amp * np.sin(np.pi * tt / dur) ** 2 * np.sin(2 * np.pi * 160 * tt)).astype(np.float32)
+    gap = np.zeros(int(sr_ * 0.05), np.float32)
+    k, _ = stress.detect_from_audio(np.concatenate([gap, _syl(0.3, 0.6), gap, _syl(0.12, 0.3), gap]), sr_, "замок")
+    assert k == 0, k
+    sd.show(); app.processEvents(); sd.grab().save(str(tmp / "stress.png")); sd.close()
     # проекты: список, сохранить как, недавние
     from golos.app import ProjectsDialog, project_info
     w.new_project("Промо GradeStream")
@@ -127,7 +139,7 @@ def main():
     if out:
         import shutil
         Path(out).mkdir(parents=True, exist_ok=True)
-        for n in ("edit.png", "dub.png", "send.png", "srt.png", "projects.png"):
+        for n in ("edit.png", "dub.png", "send.png", "srt.png", "projects.png", "stress.png"):
             shutil.copy(tmp / n, Path(out) / n)
     w.close()
     # модули синтеза должны импортироваться (ловим несовместимые версии torch/torchaudio)

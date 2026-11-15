@@ -165,3 +165,83 @@ def for_model(text: str, lang: str, mode: str = "acute") -> str:
             return "".join(chars)
         return base[:k + 1] + ACUTE + base[k + 1:]
     return _WORD.sub(conv, text)
+
+
+# ---------------- ударение по записи голоса ----------------
+def vowel_positions(word: str) -> list[int]:
+    w = strip(word)
+    return [i for i, ch in enumerate(w) if ch in VOWELS]
+
+
+def set_stress(word: str, vowel_no: int) -> str:
+    """Ставит «+» перед vowel_no-й гласной слова (счёт с 0)."""
+    w = strip(word)
+    pos = vowel_positions(w)
+    if not 0 <= vowel_no < len(pos):
+        return w
+    i = pos[vowel_no]
+    return w[:i] + "+" + w[i:]
+
+
+def detect_from_audio(x, sr: int, word: str):
+    """Находит ударный слог в записи одного слова. Возвращает (номер гласной, уверенность 0..1) или (None, 0).
+    Признаки ударения в русском: ударный гласный длиннее и громче безударных (и обычно выше по тону)."""
+    import numpy as np
+    from scipy.signal import find_peaks, peak_widths
+    from . import dsp
+    n = len(vowel_positions(word))
+    if n == 0:
+        return None, 0.0
+    if n == 1:
+        return 0, 1.0
+    x = np.asarray(x, dtype=np.float32)
+    hop = 0.01
+    rms = dsp.rms_frames(x, sr, hop)
+    if len(rms) < 10 or rms.max() < 1e-3:
+        return None, 0.0
+    # сглаживание 40 мс и обрезка тишины
+    k = 4
+    env = np.convolve(rms, np.ones(k) / k, mode="same")
+    thr = env.max() * 0.08
+    voiced = np.nonzero(env > thr)[0]
+    if len(voiced) < 5:
+        return None, 0.0
+    a, b = voiced[0], voiced[-1] + 1
+    e = env[a:b]
+    # слоговые ядра — пики энергии
+    peaks, props = find_peaks(e, distance=max(1, int(0.07 / hop)), prominence=e.max() * 0.06)
+    if len(peaks) != n:
+        # не совпало число слогов — берём n самых заметных пиков или делим звучание поровну
+        if len(peaks) > n:
+            order = np.argsort(props["prominences"])[::-1][:n]
+            peaks = np.sort(peaks[order])
+        else:
+            edges = np.linspace(0, len(e), n + 1).astype(int)
+            peaks = np.array([s + int(np.argmax(e[s:t])) for s, t in zip(edges[:-1], edges[1:]) if t > s])
+            if len(peaks) != n:
+                return None, 0.0
+    widths = peak_widths(e, peaks, rel_height=0.5)[0] * hop
+    heights = e[peaks]
+    # тон: средняя частота основного тона вокруг пика (если librosa есть)
+    pitch = np.ones(n)
+    try:
+        import librosa
+        seg = x[int(a * hop * sr): int(b * hop * sr)]
+        f0, vflag, _ = librosa.pyin(seg, fmin=70, fmax=400, sr=sr, frame_length=1024,
+                                    hop_length=int(hop * sr))
+        for i, p in enumerate(peaks):
+            w = f0[max(0, p - 3): p + 4]
+            w = w[~np.isnan(w)] if w is not None else []
+            if len(w):
+                pitch[i] = float(np.mean(w))
+        if np.all(pitch > 1):
+            pitch = pitch / pitch.mean()
+        else:
+            pitch = np.ones(n)
+    except Exception:  # noqa: BLE001
+        pass
+    score = (widths / widths.mean()) * 0.5 + (heights / heights.mean()) * 0.3 + pitch * 0.2
+    best = int(np.argmax(score))
+    srt = np.sort(score)[::-1]
+    conf = float(min(1.0, (srt[0] - srt[1]) / max(1e-6, srt[0]) * 4)) if n > 1 else 1.0
+    return best, conf

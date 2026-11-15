@@ -359,6 +359,113 @@ class ProjectsDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
 
 
+class StressWordDialog(QDialog):
+    """Ударение в одном слове: клик по гласной, запись голоса (программа найдёт ударный слог) или RuAccent."""
+
+    def __init__(self, win: "MainWindow", word: str, phrase: str, index: int):
+        super().__init__(win)
+        self.win, self.word, self.phrase, self.index = win, stress.strip(word), phrase, index
+        self.choice: int | None = None
+        self.rec = None
+        self.audio = None
+        self.setWindowTitle(T("Ударение: ", "Stress: ") + self.word)
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(T("Кликните ударную гласную — или запишите, как слово должно звучать.",
+                             "Click the stressed vowel — or record how the word should sound.")))
+        row = QHBoxLayout(); row.addStretch(1)
+        self.btns = []
+        vpos = stress.vowel_positions(self.word)
+        for i, ch in enumerate(self.word):
+            if i in vpos:
+                b = QPushButton(ch); b.setCheckable(True)
+                b.setStyleSheet("QPushButton{font-size:22pt;min-width:34px;padding:4px}"
+                                "QPushButton:checked{background:#d9a400;color:black}")
+                b.clicked.connect(lambda _=False, k=vpos.index(i): self.pick(k))
+                self.btns.append(b); row.addWidget(b)
+            else:
+                l = QLabel(ch); l.setStyleSheet("font-size:22pt"); row.addWidget(l)
+        row.addStretch(1); v.addLayout(row)
+        self.info = QLabel(""); self.info.setAlignment(Qt.AlignCenter); v.addWidget(self.info)
+        r2 = QHBoxLayout()
+        self.rec_btn = QPushButton("● " + T("Записать слово", "Record the word"))
+        self.rec_btn.setStyleSheet("QPushButton{background:#a3242f;color:white;font-weight:bold;padding:8px}")
+        self.rec_btn.clicked.connect(self.toggle_rec)
+        self.play_btn = QPushButton("▶ " + T("Моя запись", "My recording")); self.play_btn.setEnabled(False)
+        self.play_btn.clicked.connect(lambda: self.audio is not None and win.player.play(self.audio[0], self.audio[1]))
+        auto = QPushButton(T("Подобрать автоматически", "Auto (RuAccent)"))
+        auto.clicked.connect(self.auto)
+        for b in (self.rec_btn, self.play_btn, auto):
+            r2.addWidget(b)
+        v.addLayout(r2)
+        self.cb_regen = QCheckBox(T("Сразу перегенерировать фразу выбранным голосом", "Regenerate the phrase right away"))
+        self.cb_regen.setChecked(True); v.addWidget(self.cb_regen)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject); v.addWidget(bb)
+        self.ok = bb.button(QDialogButtonBox.Ok); self.ok.setEnabled(False)
+        known = stress.load_dict().get(self.word.lower())
+        if known and "+" in known:
+            k = sum(1 for ch in known[:known.index("+")] if ch in stress.VOWELS)
+            self.pick(k, T("из словаря", "from dictionary"))
+        self.timer = QTimer(self); self.timer.timeout.connect(self._tick)
+
+    def pick(self, k: int, why: str = ""):
+        self.choice = k
+        for i, b in enumerate(self.btns):
+            b.setChecked(i == k)
+        self.info.setText(stress.set_stress(self.word, k) + (f"   ({why})" if why else ""))
+        self.ok.setEnabled(True)
+
+    def toggle_rec(self):
+        if self.rec is None:
+            dev = int(self.win.s.value("mic", -1))
+            self.rec = audio_io.Recorder(None if dev < 0 else dev)
+            try:
+                self.rec.start()
+            except Exception as e:  # noqa: BLE001
+                self.rec = None
+                QMessageBox.warning(self, APP_NAME, str(e)); return
+            self.rec_btn.setText("■ " + T("Стоп", "Stop"))
+            self.info.setText(T("Говорите слово… (остановится само через 3 с)", "Say the word… (stops in 3 s)"))
+            self.timer.start(100)
+        else:
+            self._stop()
+
+    def _tick(self):
+        if self.rec is not None and self.rec.seconds >= 3.0:
+            self._stop()
+
+    def _stop(self):
+        self.timer.stop()
+        x, sr = self.rec.stop()
+        self.rec = None
+        self.rec_btn.setText("● " + T("Записать ещё раз", "Record again"))
+        if len(x) < sr * 0.2:
+            self.info.setText(T("Слишком коротко — запишите ещё раз", "Too short — record again")); return
+        self.audio = (x, sr); self.play_btn.setEnabled(True)
+        k, conf = stress.detect_from_audio(x, sr, self.word)
+        if k is None:
+            self.info.setText(T("Не удалось разобрать слоги — кликните ударную гласную сами",
+                                "Could not find syllables — click the stressed vowel"))
+            return
+        self.pick(k, T("по записи", "from recording") + ("" if conf > 0.3 else T(", не уверена — проверьте", ", unsure — check")))
+
+    def auto(self):
+        res = stress.auto_stress_word(self.phrase, self.index, self.win.log)
+        if not res:
+            self.info.setText(T("Не определилось — кликните гласную", "Not found — click the vowel")); return
+        w = stress.words_of(res)[self.index]
+        k = sum(1 for ch in w[:w.index("+")] if ch in stress.VOWELS)
+        self.pick(k, "RuAccent")
+
+    def result(self) -> str:
+        return stress.set_stress(self.word, self.choice) if self.choice is not None else self.word
+
+    def reject(self):
+        if self.rec is not None:
+            self.rec.stop(); self.rec = None
+        super().reject()
+
+
 # =====================================================================
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1580,9 +1687,9 @@ class MainWindow(QMainWindow):
             return
         sub = m.addMenu(T("Ударение в слове", "Stress in word"))
         for i, w in enumerate(stress.words_of(ph.text)):
-            if stress.vowel_count(stress.strip(w)) >= 2 and "+" not in w:
+            if stress.vowel_count(stress.strip(w)) >= 2:
                 a = sub.addAction(w)
-                a.triggered.connect(lambda _=False, pid=pid, i=i: self.add_stress(pid, i))
+                a.triggered.connect(lambda _=False, pid=pid, i=i: self.stress_dialog(pid, i))
         if not sub.actions():
             sub.setEnabled(False)
         a = m.addAction(T("Убрать ударения из фразы", "Remove stress marks"))
@@ -1598,6 +1705,38 @@ class MainWindow(QMainWindow):
             if "+" in w:
                 stress.save_word(w)
         self.p.save(); self.text.rebuild(); self.fill_dub_table()
+
+    def stress_dialog(self, pid: int, i: int):
+        ph = next((x for x in self.p.phrases() if x.id == pid), None)
+        if not ph:
+            return
+        words = stress.words_of(ph.text)
+        if not 0 <= i < len(words):
+            return
+        dlg = StressWordDialog(self, words[i], ph.text, i)
+        if not dlg.exec():
+            return
+        new_word = dlg.result()
+        # подставляем слово с ударением на место i-го слова фразы
+        import re as _re
+        ms = list(_re.finditer(r"[A-Za-zА-Яа-яЁё+\u0301-]+", ph.text))
+        m_ = ms[i]
+        src = stress.strip(m_.group(0))
+        fixed = "".join(ch.upper() if (k < len(src) and src[k].isupper()) else ch
+                        for k, ch in enumerate(new_word.replace("+", ""))) if new_word else src
+        # переносим «+» обратно с учётом регистра
+        pos = new_word.find("+")
+        fixed = fixed[:pos] + "+" + fixed[pos:] if pos >= 0 else fixed
+        self._set_phrase_text(pid, ph.text[:m_.start()] + fixed + ph.text[m_.end():])
+        stress.save_word(fixed)
+        self.log(T(f"Ударение: {fixed} — запомнено в словаре", f"Stress: {fixed} — saved to dictionary"))
+        if dlg.cb_regen.isChecked():
+            langs = [l for l in self.selected_langs() if l == "ru"]
+            if "ru" in langs:
+                self.run_dub({"ru": {pid}}, ask=False)
+            else:
+                self.log(T("Русская озвучка не отмечена в «Языках» — отметьте «Русский», чтобы перегенерировать.",
+                           "Russian isn't ticked in Languages — tick it to regenerate."))
 
     def add_stress(self, pid: int, i: int):
         ph = next((x for x in self.p.phrases() if x.id == pid), None)
