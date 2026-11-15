@@ -537,6 +537,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_edit_tab(), T("1. Запись и монтаж", "1. Record & edit"))
         self.tabs.addTab(self._build_dub_tab(), T("2. Перевод и озвучка", "2. Translate & voice"))
         self.tabs.addTab(self._build_export_tab(), T("3. Отправка в чат", "3. Send to chat"))
+        from .train_tab import TrainTab
+        self.train = TrainTab(self)
+        self.tabs.addTab(self.train, T("4. Обучение голоса", "4. Voice training"))
         self.setCentralWidget(self.tabs)
 
         dock = QDockWidget(T("Журнал", "Log"), self); dock.setObjectName("log")
@@ -565,15 +568,24 @@ class MainWindow(QMainWindow):
         ]:
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.WindowShortcut)
-            sc.activated.connect(lambda f=fn, k=seq: self._hotkey(f, k in ("Space", "Ctrl+Z", "Ctrl+Y", "Ctrl+Shift+Z")))
+            sc.activated.connect(lambda f=fn, k=seq: self._hotkey(f, k in ("Space", "Ctrl+Z", "Ctrl+Y", "Ctrl+Shift+Z"), k))
         self.log(f"{APP_NAME} {__version__}. " + T("Видеокарта: ", "GPU: ") + models.torch_info())
 
-    def _hotkey(self, fn, any_tab: bool = False):
+    def _hotkey(self, fn, any_tab: bool = False, key: str = ""):
         """Горячие клавиши не срабатывают, пока вы печатаете в поле ввода;
-        клавиши монтажа работают только на вкладке «Запись и монтаж»."""
+        клавиши монтажа работают только на вкладке «Запись и монтаж», на вкладке «Обучение» — свои."""
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit)) or \
+                (isinstance(fw, QTextEdit) and not fw.isReadOnly()):
+            return
+        if self.tabs.currentIndex() == 3:
+            route = {"R": self.train.toggle_record, "Right": self.train.next, "Left": self.train.prev,
+                     "Space": self.train.play_last}
+            if key in route:
+                route[key]()
+            return
         if not any_tab and self.tabs.currentIndex() != 0:
             return
-        fw = QApplication.focusWidget()
         if isinstance(fw, (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit)) or \
                 (isinstance(fw, QTextEdit) and not fw.isReadOnly()):
             return
@@ -2027,7 +2039,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         try:
-            models.release_tts()
+            models.release_tts(); models.release_whisper()
         except Exception:  # noqa: BLE001
             pass
         if self.rec is not None:

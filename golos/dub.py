@@ -66,9 +66,14 @@ class Dubber:
         voice = voices.get(self.p.voice)
         ref_audio, ref_text = voices.reference(voice, self.p)
         self.log(f"Голос «{voice.name}»: образец {len(ref_audio) / 24000:.1f} с — «{ref_text[:80]}…»")
+        from .models import TTS_BASE_ID
+        self.trained = (voice.description, voice.speaker) if voice.kind == "trained" else None
         by_model: dict[str, list[str]] = {}
         for lang in langs:
-            by_model.setdefault(TTS_LANGS[lang][0], []).append(lang)
+            repo = TTS_LANGS[lang][0]
+            if self.trained and repo == TTS_BASE_ID:
+                repo = self.trained[0]           # обученная модель вместо базовой
+            by_model.setdefault(repo, []).append(lang)
 
         jobs = []
         for lang in langs:
@@ -115,7 +120,8 @@ class Dubber:
                 continue
             tts = get_tts(repo, self.log, precision)
             try:
-                tts.set_reference(ref_audio, ref_text)
+                if not (self.trained and repo == self.trained[0]):
+                    tts.set_reference(ref_audio, ref_text)
                 for lang, d in mjobs:
                     if self.cancelled():
                         return
@@ -133,7 +139,8 @@ class Dubber:
                         release_tts()
                         precision = "fp32"
                         tts = get_tts(repo, self.log, "fp32")
-                        tts.set_reference(ref_audio, ref_text)
+                        if not (self.trained and repo == self.trained[0]):
+                            tts.set_reference(ref_audio, ref_text)
                         wavs, sr = self._gen(tts, d.text, lang, n, temperature, max(6.0, slot * 2.5))
                     new = []
                     for vi, w in enumerate(wavs):
@@ -178,8 +185,26 @@ class Dubber:
         """Генерация n вариантов фразы с учётом ударений, словаря произношения и двуязычия."""
         from . import stress
         mixed = mixed or self.mixed_mode
-        mtext = stress.for_model(text, lang, self.stress_mode)
+        tr = getattr(self, "trained", None)
         lname = TTS_LANGS[lang][1]
+        tr = getattr(self, "trained", None)
+        if tr and tts.repo_id == tr[0] and lang == "ru":
+            # обученный голос учился на тексте с ударением в каждом слове — даём текст в том же виде
+            mtext = stress.for_model(stress.accent_full(text, self.log), lang, "acute")
+        else:
+            mtext = stress.for_model(text, lang, self.stress_mode)
+        if tr and tts.repo_id == tr[0]:
+            if mixed == "split" and lang == "ru" and stress.has_latin(mtext):
+                pass  # склейка ниже работает и для обученной модели через custom_many
+            else:
+                if lang == "ru" and mixed == "auto" and stress.has_latin(mtext):
+                    try:
+                        return tts.custom_many([mtext] * n, "auto", tr[1], temperature, max_s)
+                    except FloatingPointError:
+                        raise
+                    except Exception:  # noqa: BLE001
+                        pass
+                return tts.custom_many([mtext] * n, lname, tr[1], temperature, max_s)
         if lang == "ru" and stress.has_latin(mtext) and mixed != "plain":
             if mixed == "auto":
                 try:
@@ -193,7 +218,10 @@ class Dubber:
                 parts, sr = [], 24000
                 for l, t in segs:
                     ln = "english" if l == "en" else "russian"
-                    w, sr = tts.generate([t] * n, ln, temperature, max_seconds=max(4.0, len(t) * 0.15 + 3))
+                    if tr and tts.repo_id == tr[0]:
+                        w, sr = tts.custom_many([t] * n, ln, tr[1], temperature, max(4.0, len(t) * 0.15 + 3))
+                    else:
+                        w, sr = tts.generate([t] * n, ln, temperature, max_seconds=max(4.0, len(t) * 0.15 + 3))
                     parts.append([trim_silence(np.asarray(x, np.float32), sr, pad=0.03) for x in w])
                 gap = np.zeros(int(0.07 * sr), np.float32)
                 out = []

@@ -123,6 +123,9 @@ _no_symlinks()
 
 def ensure_downloaded(repo_id: str, log: Log) -> str:
     """Скачивает модель с Hugging Face (при первом запуске) и возвращает путь к её папке."""
+    from pathlib import Path as _P
+    if _P(repo_id).is_dir():            # локальная (обученная) модель
+        return repo_id
     from huggingface_hub import snapshot_download
     target = models_dir() / repo_id.replace("/", "--")
     done = target / ".golos_complete"
@@ -146,6 +149,8 @@ def get_tts(repo_id: str, log: Log, precision: str = "fp16") -> "TTS":
         m.log = log
         return m
     release_tts()
+    if _gpu_free_gb() < 5.0:
+        release_whisper()
     log("Загружаю модель голоса в видеопамять (один раз за сеанс, 10–20 с)…")
     import time
     t0 = time.time()
@@ -171,6 +176,25 @@ def _gpu_free_gb() -> float:
     except Exception:  # noqa: BLE001
         pass
     return 99.0
+
+
+_WH_CACHE: dict = {"model": None}
+
+
+def get_whisper(log: Log) -> "Whisper":
+    """Whisper остаётся в памяти — проверка каждого дубля без повторной загрузки."""
+    if _WH_CACHE["model"] is None:
+        _WH_CACHE["model"] = Whisper(log)
+    else:
+        _WH_CACHE["model"].log = log
+    return _WH_CACHE["model"]
+
+
+def release_whisper():
+    m = _WH_CACHE["model"]
+    if m is not None:
+        _WH_CACHE["model"] = None
+        m.close()
 
 
 # ---------------- Whisper ----------------
@@ -354,6 +378,32 @@ class TTS:
                 return np.asarray(wavs[0], np.float32).reshape(-1), int(sr)
             except (ValueError, KeyError, AssertionError) as e:
                 last = e
+        raise last
+
+    def custom_many(self, texts: list[str], language: str, speaker: str, temperature: float = 0.8,
+                    max_seconds: float = 30.0):
+        """Генерация обученным голосом (модель после дообучения, говорит именем speaker)."""
+        import torch
+        last = None
+        for lang in (language, language.capitalize()):
+            base = dict(text=list(texts), language=[lang] * len(texts), speaker=[speaker] * len(texts))
+            for extra in (dict(do_sample=True, temperature=temperature, top_k=50,
+                               max_new_tokens=int(max_seconds * 12.5) + 24), {}):
+                try:
+                    with torch.inference_mode():
+                        wavs, sr = self.model.generate_custom_voice(**base, **extra)
+                    out = [np.asarray(w, np.float32).reshape(-1) for w in wavs]
+                    if any(not np.all(np.isfinite(w)) for w in out):
+                        raise FloatingPointError("NaN в синтезе")
+                    return out, int(sr)
+                except FloatingPointError:
+                    raise
+                except TypeError as e:
+                    last = e
+                    continue
+                except (ValueError, KeyError, AssertionError) as e:
+                    last = e
+                    break
         raise last
 
     def speakers(self) -> list[str]:

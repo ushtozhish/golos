@@ -32,6 +32,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\golos\*.py"; DestDir: "{app}\golos"; Flags: ignoreversion
 Source: "..\golos\icon.ico"; DestDir: "{app}\golos"; Flags: ignoreversion
+Source: "..\golos\trainscript.txt"; DestDir: "{app}\golos"; Flags: ignoreversion
 Source: "..\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "setup_env.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uv.exe"; DestDir: "{app}"; Flags: ignoreversion

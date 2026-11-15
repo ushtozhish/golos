@@ -90,11 +90,16 @@ def apply_dict(text: str) -> str:
 
 # ---------------- автоматическая расстановка (RuAccent) ----------------
 _ACC = None
+_ACC_DICT_MTIME = 0.0
 
 
 def _accentizer(log=lambda m: None):
-    global _ACC
+    global _ACC, _ACC_DICT_MTIME
+    mt = dict_path().stat().st_mtime if dict_path().exists() else 0.0
+    if _ACC is not None and mt != _ACC_DICT_MTIME:
+        _ACC = None                    # словарь изменился — перезагружаем со свежими словами
     if _ACC is None:
+        _ACC_DICT_MTIME = mt
         from ruaccent import RUAccent
         from .models import models_dir
         wd = models_dir() / "ruaccent"
@@ -307,3 +312,32 @@ def split_by_script(text: str) -> list[tuple[str, str]]:
     elif pos < len(text) and out:
         out[-1] = (out[-1][0], out[-1][1] + text[pos:].rstrip())
     return [(l, t) for l, t in out if t]
+
+
+def accent_full(text: str, log=lambda m: None) -> str:
+    """Ударение в КАЖДОМ слове из двух и более слогов: сначала ваш словарь и уже стоящие «+»,
+    остальное — RuAccent с учётом контекста. Так размечаются тексты для обучения и для обученного голоса."""
+    text = apply_dict(text)
+    try:
+        acc = _accentizer(log)
+        res = acc.process_all(strip(text))
+    except Exception as e:  # noqa: BLE001
+        log(f"RuAccent недоступен ({e}) — ударения только из словаря")
+        return text
+    src = list(_WORD.finditer(text))
+    got = [m.group(0) for m in _WORD.finditer(res)]
+    plain_src = [strip(m.group(0)).lower() for m in src]
+    plain_got = [strip(w).lower() for w in got]
+    if plain_src != plain_got:
+        return text                       # токенизация разошлась — не рискуем
+    out, pos = [], 0
+    for m, g in zip(src, got):
+        w = m.group(0)
+        out.append(text[pos:m.start()])
+        if "+" in w or vowel_count(strip(w)) < 2 or "+" not in g:
+            out.append(w)
+        else:
+            out.append(_match_case(strip(w), g))
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)

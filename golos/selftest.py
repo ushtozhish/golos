@@ -130,6 +130,21 @@ def main():
     k, _ = stress.detect_from_audio(np.concatenate([gap, _syl(0.3, 0.6), gap, _syl(0.12, 0.3), gap]), sr_, "замок")
     assert k == 0, k
     sd.show(); app.processEvents(); sd.grab().save(str(tmp / "stress.png")); sd.close()
+    # обучение голоса: фразы, дубль, проверки, пакет
+    from golos import trainset
+    tt = w.train
+    assert len(tt.ts.lines) == 250, len(tt.ts.lines)
+    assert tt.ts.by_no[103].hint and "выделить" not in tt.ts.by_no[103].text
+    w.tabs.setCurrentIndex(3); app.processEvents()
+    take = tt.ts.add_take(1, (np.sin(2 * np.pi * 200 * np.arange(SR * 2) / SR) * 0.3).astype(np.float32), SR)
+    trainset.text_check(take, tt.ts.by_no[1].text, tt.ts.by_no[1].text)
+    tt.ts.save(); tt.fill_takes(); tt.fill_list(); app.processEvents()
+    w.grab().save(str(tmp / "train.png"))
+    take.problems = []; take.ok = True; tt.ts.save()
+    zp = trainset.export_package(tt.ts, "my_voice", w.log, accent=False)
+    import zipfile as _zf
+    names = _zf.ZipFile(zp).namelist()
+    assert "train_raw.jsonl" in names and "run_train.sh" in names and "ref.wav" in names, names
     # проекты: список, сохранить как, недавние
     from golos.app import ProjectsDialog, project_info
     w.new_project("Промо GradeStream")
@@ -143,7 +158,7 @@ def main():
     if out:
         import shutil
         Path(out).mkdir(parents=True, exist_ok=True)
-        for n in ("edit.png", "dub.png", "send.png", "srt.png", "projects.png", "stress.png"):
+        for n in ("edit.png", "dub.png", "send.png", "srt.png", "projects.png", "stress.png", "train.png"):
             shutil.copy(tmp / n, Path(out) / n)
     w.close()
     # модули синтеза должны импортироваться (ловим несовместимые версии torch/torchaudio)

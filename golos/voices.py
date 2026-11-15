@@ -32,7 +32,7 @@ SAMPLE_TEXT = {
 class Voice:
     id: str
     name: str
-    kind: str              # me | file | design | preset | etalon
+    kind: str              # me | file | design | preset | etalon | trained
     text: str = ""         # текст образца
     description: str = ""  # для design
     speaker: str = ""      # для preset
