@@ -16,7 +16,7 @@ def main():
     tmp = Path(tempfile.mkdtemp())
     os.environ["APPDATA"] = str(tmp)
     s = QSettings("GolosApp", "Golos")
-    s.setValue("root", str(tmp)); s.setValue("last_project", "")
+    s.setValue("root", str(tmp)); s.setValue("last_project", ""); s.setValue("open_last", "true")
     from golos.app import MainWindow
     from golos.project import Word, SR, DubPhrase, Variant
     from golos import exporter, voices
@@ -114,12 +114,20 @@ def main():
     app.processEvents(); w.grab().save(str(tmp / "srt.png"))
     z2 = exporter.export_package(w.p, [], w.log)
     assert z2.exists()
+    # проекты: список, сохранить как, недавние
+    from golos.app import ProjectsDialog, project_info
+    w.new_project("Промо GradeStream")
+    assert w.p.name == "Промо GradeStream"
+    pd = ProjectsDialog(w)
+    assert pd.table.rowCount() >= 3, pd.table.rowCount()
+    pd.show(); app.processEvents(); pd.grab().save(str(tmp / "projects.png")); pd.close()
+    assert len(w._recent()) >= 2
     print("SELFTEST OK", tmp)
     out = os.environ.get("GOLOS_SHOTS")
     if out:
         import shutil
         Path(out).mkdir(parents=True, exist_ok=True)
-        for n in ("edit.png", "dub.png", "send.png", "srt.png"):
+        for n in ("edit.png", "dub.png", "send.png", "srt.png", "projects.png"):
             shutil.copy(tmp / n, Path(out) / n)
     w.close()
     # модули синтеза должны импортироваться (ловим несовместимые версии torch/torchaudio)

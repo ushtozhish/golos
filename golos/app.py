@@ -183,6 +183,182 @@ class NewVoiceDialog(QDialog):
                 "text": self.file_text.text().strip(), "lang": self.file_lang.currentData()}
 
 
+def safe_name(name: str) -> str:
+    import re as _re
+    name = _re.sub(r'[<>:"/\\|?*]+', " ", name).strip().rstrip(".")
+    return name[:80] or "Проект"
+
+
+def project_info(folder: Path) -> dict:
+    """Короткая сводка проекта без загрузки звука."""
+    import json as _json
+    info = {"name": folder.name, "mtime": 0.0, "phrases": 0, "langs": [], "srt": False}
+    f = folder / "project.json"
+    try:
+        info["mtime"] = f.stat().st_mtime
+        st = _json.loads(f.read_text("utf-8"))
+        words = st.get("words", [])
+        info["srt"] = bool(st.get("from_srt"))
+        if info["srt"]:
+            info["phrases"] = len(words)
+        else:
+            info["phrases"] = sum(1 for w in words if str(w.get("text", "")).rstrip().endswith((".", "!", "?", "…"))) or \
+                (1 if words else 0)
+        info["langs"] = [k for k, v in st.get("dub", {}).items() if any(d.get("variants") for d in v)]
+    except Exception:  # noqa: BLE001
+        pass
+    return info
+
+
+class ProjectsDialog(QDialog):
+    """Список проектов: открыть, новый, переименовать, дублировать, удалить."""
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win)
+        self.win = win
+        self.choice: Path | None = None
+        self.action = None
+        self.setWindowTitle(T("Проекты", "Projects"))
+        self.resize(820, 520)
+        v = QVBoxLayout(self)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels([T("Проект", "Project"), T("Изменён", "Modified"),
+                                              T("Фраз", "Phrases"), T("Озвучено", "Voiced")])
+        h = self.table.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in (1, 2, 3):
+            h.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.doubleClicked.connect(self._open)
+        v.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        for text, fn in [(T("Открыть", "Open"), self._open), (T("Новый…", "New…"), self._new),
+                         (T("Переименовать…", "Rename…"), self._rename), (T("Дублировать…", "Duplicate…"), self._dup),
+                         (T("Удалить", "Delete"), self._delete), (T("Показать в папке", "Show in folder"), self._reveal),
+                         (T("Открыть из другой папки…", "Open from another folder…"), self._browse)]:
+            b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
+        v.addLayout(row)
+        self.cb_last = QCheckBox(T("Открывать последний проект при запуске (без этого окна)",
+                                   "Open the last project on start (skip this window)"))
+        self.cb_last.setChecked(win.s.value("open_last", "false") == "true")
+        self.cb_last.toggled.connect(lambda c: win.s.setValue("open_last", str(c).lower()))
+        v.addWidget(self.cb_last)
+        self.fill()
+
+    def folders(self) -> list[Path]:
+        root = self.win.root()
+        out = [d for d in root.iterdir() if d.is_dir() and (d / "project.json").exists()]
+        return sorted(out, key=lambda d: (d / "project.json").stat().st_mtime, reverse=True)
+
+    def fill(self):
+        import datetime as _dt
+        self.items = self.folders()
+        self.table.setRowCount(len(self.items))
+        cur = self.win.p.folder if self.win.p else None
+        for r, d in enumerate(self.items):
+            info = project_info(d)
+            name = info["name"] + (T("  (открыт)", "  (open)") if cur and d == cur else "")
+            self.table.setItem(r, 0, QTableWidgetItem(name))
+            self.table.setItem(r, 1, QTableWidgetItem(_dt.datetime.fromtimestamp(info["mtime"]).strftime("%d.%m.%Y %H:%M")))
+            self.table.setItem(r, 2, QTableWidgetItem((str(info["phrases"]) if info["phrases"] else "—") +
+                                                      (" · SRT" if info["srt"] else "")))
+            self.table.setItem(r, 3, QTableWidgetItem(", ".join(info["langs"]) or "—"))
+        if self.items:
+            self.table.selectRow(0)
+
+    def _sel(self) -> Path | None:
+        r = self.table.currentRow()
+        return self.items[r] if 0 <= r < len(self.items) else None
+
+    def _open(self, *_):
+        d = self._sel()
+        if d:
+            self.choice, self.action = d, "open"
+            self.accept()
+
+    def _new(self):
+        self.action = "new"
+        self.accept()
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, T("Папка проекта", "Project folder"), str(self.win.root()))
+        if d and Path(d, "project.json").exists():
+            self.choice, self.action = Path(d), "open"
+            self.accept()
+
+    def _ask_name(self, title: str, default: str) -> str | None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, title, T("Название проекта:", "Project name:"), text=default)
+        if not ok or not name.strip():
+            return None
+        return safe_name(name)
+
+    def _rename(self):
+        d = self._sel()
+        if not d:
+            return
+        name = self._ask_name(T("Переименовать", "Rename"), d.name)
+        if not name or name == d.name:
+            return
+        new = d.parent / name
+        if new.exists():
+            QMessageBox.warning(self, APP_NAME, T("Проект с таким названием уже есть.", "A project with this name exists.")); return
+        is_open = self.win.p is not None and self.win.p.folder == d
+        if is_open:
+            self.win.p.save(); self.win.stop_play()
+        try:
+            d.rename(new)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, str(e)); return
+        if is_open:
+            self.win.open_project(new)
+        self.fill()
+
+    def _dup(self):
+        import shutil
+        d = self._sel()
+        if not d:
+            return
+        name = self._ask_name(T("Дублировать", "Duplicate"), d.name + T(" (копия)", " (copy)"))
+        if not name:
+            return
+        new = d.parent / name
+        if new.exists():
+            QMessageBox.warning(self, APP_NAME, T("Проект с таким названием уже есть.", "A project with this name exists.")); return
+        if self.win.p is not None and self.win.p.folder == d:
+            self.win.p.save()
+        shutil.copytree(d, new, ignore=shutil.ignore_patterns("export", "stress_test"))
+        self.fill()
+
+    def _delete(self):
+        import shutil
+        import time as _t
+        d = self._sel()
+        if not d:
+            return
+        if QMessageBox.question(self, APP_NAME, T(f"Удалить проект «{d.name}»?\nОн переместится в папку «_Корзина» "
+                                                  f"рядом с проектами — его можно будет вернуть.",
+                                                  f"Delete «{d.name}»? It moves to «_Корзина» next to the projects.")) \
+                != QMessageBox.Yes:
+            return
+        if self.win.p is not None and self.win.p.folder == d:
+            self.win.stop_play(); self.win.p = None
+            self.win.tl.view.set_project(None); self.win.text.set_project(None)
+            self.win.fill_dub_table(); self.win._update_state()
+        trash = d.parent / "_Корзина"
+        trash.mkdir(exist_ok=True)
+        shutil.move(str(d), str(trash / f"{d.name} {_t.strftime('%Y-%m-%d %H-%M-%S')}"))
+        self.fill()
+
+    def _reveal(self):
+        d = self._sel()
+        if d:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+
+
 # =====================================================================
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -202,19 +378,23 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self); self.timer.timeout.connect(self._tick); self.timer.start(33)
         QApplication.clipboard().dataChanged.connect(self._clipboard_changed)
         last = self.s.value("last_project", "")
-        if last and Path(last, "project.json").exists():
+        if self.s.value("open_last", "false") == "true" and last and Path(last, "project.json").exists():
             try:
                 self.open_project(Path(last))
             except Exception as e:  # noqa: BLE001
                 self.log(f"Не удалось открыть последний проект: {e}")
+        else:
+            QTimer.singleShot(150, self.projects_dialog)
         self._update_state()
 
     # ================= интерфейс =================
     def _build(self):
         tb = self.addToolBar("main"); tb.setMovable(False)
         for text, key, fn in [
-            (T("Новый", "New"), QKeySequence.New, self.new_project),
-            (T("Открыть…", "Open…"), QKeySequence.Open, self.open_dialog),
+            (T("Проекты…", "Projects…"), QKeySequence.Open, self.projects_dialog),
+            (T("Новый…", "New…"), QKeySequence.New, self.new_project_named),
+            (T("Сохранить", "Save"), QKeySequence.Save, self.save_project),
+            (T("Сохранить как…", "Save as…"), QKeySequence("Ctrl+Shift+S"), self.save_as),
             (T("Открыть SRT…", "Open SRT…"), None, self.open_srt),
             (T("Импорт аудио…", "Import audio…"), None, self.import_audio),
             (T("Папка проекта", "Project folder"), None, self.open_folder),
@@ -225,6 +405,13 @@ class MainWindow(QMainWindow):
             if key:
                 a.setShortcut(key)
             a.triggered.connect(fn); tb.addAction(a)
+            if text.startswith(T("Сохранить как", "Save as")):
+                from PySide6.QtWidgets import QMenu
+                self.recent_btn = QToolButton(); self.recent_btn.setText(T("Недавние ▾", "Recent ▾"))
+                self.recent_btn.setPopupMode(QToolButton.InstantPopup)
+                self.recent_menu = QMenu(self); self.recent_btn.setMenu(self.recent_menu)
+                self.recent_menu.aboutToShow.connect(self._fill_recent)
+                tb.addWidget(self.recent_btn)
         self.title_lbl = QLabel(); tb.addSeparator(); tb.addWidget(self.title_lbl)
 
         self.tabs = QTabWidget()
@@ -567,9 +754,9 @@ class MainWindow(QMainWindow):
         r.mkdir(parents=True, exist_ok=True)
         return r
 
-    def new_project(self):
+    def new_project(self, name: str | None = None):
         self.stop_play()
-        d = base = new_project_dir(self.root())
+        d = base = (self.root() / name) if name else new_project_dir(self.root())
         i = 2
         while d.exists():
             d = Path(f"{base} ({i})"); i += 1
@@ -579,6 +766,61 @@ class MainWindow(QMainWindow):
         p.save()
         self.set_project(p)
         self.log(T("Новый проект: ", "New project: ") + str(d))
+
+    def projects_dialog(self):
+        dlg = ProjectsDialog(self)
+        if not dlg.exec():
+            return
+        if dlg.action == "open" and dlg.choice:
+            if self.p is not None and self.p.folder == dlg.choice:
+                return
+            self.open_project(dlg.choice)
+        elif dlg.action == "new":
+            self.new_project_named()
+
+    def new_project_named(self):
+        from PySide6.QtWidgets import QInputDialog
+        default = new_project_dir(self.root()).name
+        name, ok = QInputDialog.getText(self, T("Новый проект", "New project"), T("Название проекта:", "Project name:"),
+                                        text=default)
+        if not ok:
+            return
+        self.new_project(safe_name(name or default))
+
+    def save_project(self):
+        if self.p:
+            self.p.save()
+            self.log(T(f"Проект «{self.p.name}» сохранён (он и так сохраняется сам при каждом изменении)",
+                       f"Project «{self.p.name}» saved (it also autosaves on every change)"))
+
+    def save_as(self):
+        import shutil
+        from PySide6.QtWidgets import QInputDialog
+        if not self.p:
+            return
+        name, ok = QInputDialog.getText(self, T("Сохранить как", "Save as"), T("Название копии:", "Copy name:"),
+                                        text=self.p.name + T(" (копия)", " (copy)"))
+        if not ok or not name.strip():
+            return
+        new = self.root() / safe_name(name)
+        if new.exists():
+            QMessageBox.warning(self, APP_NAME, T("Проект с таким названием уже есть.", "A project with this name exists.")); return
+        self.p.save(); self.stop_play()
+        shutil.copytree(self.p.folder, new, ignore=shutil.ignore_patterns("export", "stress_test"))
+        self.open_project(new)
+
+    def _recent(self) -> list[str]:
+        r = [x for x in (self.s.value("recent", "") or "").split("|") if x]
+        return [x for x in r if Path(x, "project.json").exists()][:10]
+
+    def _fill_recent(self):
+        self.recent_menu.clear()
+        items = self._recent()
+        if not items:
+            a = self.recent_menu.addAction(T("(пусто)", "(empty)")); a.setEnabled(False)
+        for x in items:
+            a = self.recent_menu.addAction(Path(x).name)
+            a.triggered.connect(lambda _=False, x=x: self.open_project(Path(x)))
 
     def open_dialog(self):
         d = QFileDialog.getExistingDirectory(self, T("Папка проекта", "Project folder"), str(self.root()))
@@ -592,7 +834,10 @@ class MainWindow(QMainWindow):
 
     def set_project(self, p: Project):
         self.p = p
+        self.setWindowTitle(f"{p.name} — {APP_NAME} {__version__}")
         self.s.setValue("last_project", str(p.folder))
+        rec = [str(p.folder)] + [x for x in (self.s.value("recent", "") or "").split("|") if x and x != str(p.folder)]
+        self.s.setValue("recent", "|".join(rec[:10]))
         self.tl.view.set_project(p)
         self.text.set_project(p)
         self._load_edit_settings()
