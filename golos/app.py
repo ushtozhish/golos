@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -87,6 +88,15 @@ class SettingsDialog(QDialog):
         sd.clicked.connect(lambda: (stress.dict_path().exists() or stress.dict_path().write_text("{}", "utf-8"),
                                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(stress.dict_path())))))
         f.addRow(T("Ударение для модели", "Stress for the model"), self.smode)
+        self.mmode = QComboBox()
+        for m_ in stress.MIXED_MODES:
+            self.mmode.addItem(stress.MIXED_NAMES[m_], m_)
+        self.mmode.setCurrentIndex(max(0, self.mmode.findData(s.value("mixed_mode", "split"))))
+        f.addRow(T("Английские слова в русской фразе", "English words in Russian phrases"), self.mmode)
+        pd = QPushButton(T("Открыть словарь произношения", "Open pronunciation dictionary"))
+        pd.clicked.connect(lambda: (stress.pron_path().exists() or stress.pron_path().write_text("{}", "utf-8"),
+                                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(stress.pron_path())))))
+        f.addRow("", pd)
         f.addRow("", sd)
         f.addRow(QLabel(T("Видеокарта: ", "GPU: ") + models.torch_info()))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -102,7 +112,8 @@ class SettingsDialog(QDialog):
         old = self.s.value("ui_lang", "ru")
         for k, v in [("ui_lang", self.ui_lang.currentData()), ("mic", self.mic.currentData()),
                      ("source_lang", self.src.currentData()), ("root", self.root.text()),
-                     ("precision", self.prec.currentData()), ("stress_mode", self.smode.currentData())]:
+                     ("precision", self.prec.currentData()), ("stress_mode", self.smode.currentData()),
+                     ("mixed_mode", self.mmode.currentData())]:
             self.s.setValue(k, v)
         if old != self.ui_lang.currentData():
             QMessageBox.information(self, APP_NAME, T("Язык интерфейса сменится после перезапуска.",
@@ -1708,6 +1719,16 @@ class MainWindow(QMainWindow):
         a = m.addAction(T("Проверить ударение на слух (3 способа)…", "Test stress by ear (3 ways)…"))
         a.setEnabled("+" in stress.apply_dict(ph.text))
         a.triggered.connect(lambda: self.test_stress(pid))
+        latin = [w for w in stress.words_of(ph.text) if re.search(r"[A-Za-z]{2,}", w)]
+        if latin:
+            m.addSeparator()
+            sub2 = m.addMenu(T("Как читать слово (английское, бренд)", "How to read a word"))
+            for w in dict.fromkeys(latin):
+                cur = stress.load_pron().get(w.lower())
+                a = sub2.addAction(w + (f"  →  {cur}" if cur else ""))
+                a.triggered.connect(lambda _=False, w=w: self.pronounce_word(w))
+            a = m.addAction(T("Двуязычная фраза: проверить 3 способа на слух…", "Mixed-language phrase: test 3 ways…"))
+            a.triggered.connect(lambda: self.test_mixed(pid))
 
     def _set_phrase_text(self, pid: int, text: str):
         self.p.phrase_texts[pid] = text
@@ -1770,6 +1791,14 @@ class MainWindow(QMainWindow):
         self.start_task(job, done)
 
     def test_stress(self, pid: int):
+        self._ab_test(pid, T("Какой способ ударения сработал?", "Which stress method worked?"),
+                      stress.MODES, stress.MODE_NAMES, "stress_mode", "acute", "stress_test")
+
+    def test_mixed(self, pid: int):
+        self._ab_test(pid, T("Как лучше читать английские слова?", "How to read the English words?"),
+                      stress.MIXED_MODES, stress.MIXED_NAMES, "mixed_mode", "split", "mixed_test")
+
+    def _ab_test(self, pid, title, modes, names, key, default, method):
         """Окно открывается сразу; каждый способ становится доступен, как только готов."""
         ph = next((x for x in self.p.phrases() if x.id == pid), None)
         if not ph or self._busy():
@@ -1777,21 +1806,20 @@ class MainWindow(QMainWindow):
         import soundfile as sf
         from .dub import Dubber
         p, prec, text = self.p, self.s.value("precision", "fp16"), ph.text
-        dlg = QDialog(self); dlg.setWindowTitle(T("Какой способ ударения сработал?", "Which stress method worked?"))
-        dlg.setModal(False)
+        smode, mmode = self.s.value("stress_mode", "acute"), self.s.value("mixed_mode", "split")
+        dlg = QDialog(self); dlg.setWindowTitle(title); dlg.setModal(False)
         v = QVBoxLayout(dlg)
-        v.addWidget(QLabel(T("Варианты появляются по мере готовности. Послушайте и выберите тот, где ударение правильное.",
-                             "Takes appear as they are ready. Listen and pick the one with correct stress.")))
-        cur = self.s.value("stress_mode", "acute")
+        v.addWidget(QLabel(T("Варианты появляются по мере готовности. Послушайте и выберите лучший — "
+                             "этот способ будет использоваться дальше.",
+                             "Takes appear as they are ready. Pick the best — it will be used from now on.")))
+        cur = self.s.value(key, default)
         rows = {}
-        for mode in stress.MODES:
+        for mode in modes:
             row = QHBoxLayout()
-            pb = QPushButton("⏳ " + stress.MODE_NAMES[mode] + T(" — готовлю…", " — generating…"))
-            pb.setEnabled(False)
+            pb = QPushButton("⏳ " + names[mode] + T(" — готовлю…", " — generating…")); pb.setEnabled(False)
             cb = QPushButton(T("Выбрать", "Choose")); cb.setEnabled(False)
-            cb.clicked.connect(lambda _=False, mode=mode: (self.s.setValue("stress_mode", mode), dlg.accept(),
-                                                           self.log(T("Способ ударения: ", "Stress method: ") +
-                                                                    stress.MODE_NAMES[mode])))
+            cb.clicked.connect(lambda _=False, mode=mode: (self.s.setValue(key, mode), dlg.accept(),
+                                                           self.log(T("Выбран способ: ", "Chosen: ") + names[mode])))
             row.addWidget(pb, 1); row.addWidget(cb); v.addLayout(row)
             rows[mode] = (pb, cb)
         dlg.show()
@@ -1799,26 +1827,34 @@ class MainWindow(QMainWindow):
         def on_item(item):
             mode, f = item
             pb, cb = rows[mode]
-            pb.setText("▶ " + stress.MODE_NAMES[mode] + (T("  (сейчас)", "  (current)") if mode == cur else ""))
-            try:
-                pb.clicked.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            pb.setText("▶ " + names[mode] + (T("  (сейчас)", "  (current)") if mode == cur else ""))
             pb.clicked.connect(lambda _=False, f=f: self.player.play(*sf.read(f, dtype="float32")))
             pb.setEnabled(True); cb.setEnabled(True)
-            if mode == stress.MODES[0]:          # первый готовый — сразу проигрываем
+            if mode == modes[0]:
                 self.player.play(*sf.read(f, dtype="float32"))
 
         def job(task: Task):
-            return Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec).stress_test(
-                text, on_item=lambda m, f: task.item.emit((m, f)))
+            dub = Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec, smode, mmode)
+            return getattr(dub, method)(text, on_item=lambda m, f: task.item.emit((m, f)))
 
-        def done(_):
-            pass
-
-        if self.start_task(job, done):
+        if self.start_task(job, lambda _: None):
             self.task.item.connect(on_item)
             dlg.rejected.connect(lambda: self.task and self.task.cancel())
+
+    def pronounce_word(self, word: str):
+        from PySide6.QtWidgets import QInputDialog
+        cur = stress.load_pron().get(word.lower(), "")
+        how, ok = QInputDialog.getText(
+            self, T("Как читать слово", "How to read the word"),
+            T(f"Как произносить «{word}» в русской речи (кириллицей, «+» перед ударной гласной).\n"
+              f"Пусто — читать как написано.", f"How to pronounce «{word}» in Russian speech. Empty — as written."),
+            text=cur or "")
+        if not ok:
+            return
+        stress.save_pron(word, how)
+        self.log(T(f"Произношение: {word} → {how or '(как написано)'} — для всех проектов. Перегенерируйте фразы с этим словом.",
+                   f"Pronunciation: {word} → {how or '(as written)'}. Regenerate phrases with it."))
+        self.fill_dub_table()
 
     def pick_variant(self, lang: str, pid: int, k: int):
         d = next((x for x in self.p.dub.get(lang, []) if x.id == pid), None)
@@ -1865,9 +1901,10 @@ class MainWindow(QMainWindow):
         p, nv, ver, temp = self.p, self.sp_var.value(), self.cb_verify.isChecked(), self.sp_temp.value()
         prec = self.s.value("precision", "fp16")
         smode = self.s.value("stress_mode", "acute")
+        mmode = self.s.value("mixed_mode", "split")
 
         def job(task: Task):
-            Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec, smode).run(
+            Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec, smode, mmode).run(
                 langs, nv, ver, only_ids, temp, replace_variant, top_up)
 
         def done(_):

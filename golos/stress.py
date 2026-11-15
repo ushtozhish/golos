@@ -143,6 +143,7 @@ def for_model(text: str, lang: str, mode: str = "acute") -> str:
     """Текст, который уходит в нейросеть: ударения из словаря + выбранный способ передачи."""
     if lang != "ru":
         return strip(text)
+    text = apply_pron(text)
     text = apply_dict(text)
 
     def conv(m):
@@ -245,3 +246,64 @@ def detect_from_audio(x, sr: int, word: str):
     srt = np.sort(score)[::-1]
     conf = float(min(1.0, (srt[0] - srt[1]) / max(1e-6, srt[0]) * 4)) if n > 1 else 1.0
     return best, conf
+
+
+# ---------------- произношение слов (бренды, английские слова в русской речи) ----------------
+def pron_path() -> Path:
+    return dict_path().with_name("pronounce.json")
+
+
+def load_pron() -> dict[str, str]:
+    try:
+        return json.loads(pron_path().read_text("utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_pron(word: str, how: str):
+    d = load_pron()
+    if how.strip():
+        d[strip(word).lower()] = how.strip()
+    else:
+        d.pop(strip(word).lower(), None)
+    pron_path().write_text(json.dumps(d, ensure_ascii=False, indent=1, sort_keys=True), "utf-8")
+
+
+def apply_pron(text: str) -> str:
+    d = load_pron()
+    if not d:
+        return text
+
+    def rep(m):
+        w = m.group(0)
+        return d.get(strip(w).lower(), w)
+    return _WORD.sub(rep, text)
+
+
+# ---------------- двуязычные фразы ----------------
+MIXED_MODES = ("split", "auto", "plain")
+MIXED_NAMES = {"split": "Склейка: английские куски — английским произношением",
+               "auto": "Авто: модель сама определяет язык",
+               "plain": "Как пишется (всё одним языком)"}
+_LATIN_RUN = re.compile(r"[A-Za-z][A-Za-z0-9'’\-]*(?:[\s,.:;!?—–-]+[A-Za-z][A-Za-z0-9'’\-]*)*")
+
+
+def has_latin(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z]{2,}", text))
+
+
+def split_by_script(text: str) -> list[tuple[str, str]]:
+    """Делит фразу на куски [(«ru»|«en», текст)]; соседние латинские слова идут одним куском."""
+    out, pos = [], 0
+    for m in _LATIN_RUN.finditer(text):
+        if m.start() > pos and text[pos:m.start()].strip(" ,.;:!?…—–-«»\""):
+            out.append(("ru", text[pos:m.start()].strip()))
+        elif m.start() > pos and out:
+            out[-1] = (out[-1][0], out[-1][1] + text[pos:m.start()].rstrip())
+        out.append(("en", m.group(0).strip()))
+        pos = m.end()
+    if pos < len(text) and text[pos:].strip(" ,.;:!?…—–-«»\""):
+        out.append(("ru", text[pos:].strip()))
+    elif pos < len(text) and out:
+        out[-1] = (out[-1][0], out[-1][1] + text[pos:].rstrip())
+    return [(l, t) for l, t in out if t]

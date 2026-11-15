@@ -114,6 +114,10 @@ def main():
     app.processEvents(); w.grab().save(str(tmp / "srt.png"))
     z2 = exporter.export_package(w.p, [], w.log)
     assert z2.exists()
+    # двуязычие и произношение
+    assert stress.split_by_script("Clean Feed из DaVinci Resolve") == [("en", "Clean Feed"), ("ru", "из"), ("en", "DaVinci Resolve")]
+    stress.save_pron("GradeStream", "Грейдстр+им")
+    assert "Грейдстри" in stress.for_model("Знакомьтесь, GradeStream.", "ru", "acute")
     # ударение по записи / клику
     from golos.app import StressWordDialog
     sd = StressWordDialog(w, "замок", "Замок висит", 0)

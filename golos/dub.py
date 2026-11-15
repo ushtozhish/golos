@@ -39,13 +39,14 @@ class Dubber:
     def __init__(self, project: Project, log: Callable[[str], None],
                  progress: Callable[[int, int], None] = lambda a, b: None,
                  cancelled: Callable[[], bool] = lambda: False,
-                 precision: str = "fp16", stress_mode: str = "acute"):
+                 precision: str = "fp16", stress_mode: str = "acute", mixed_mode: str = "split"):
         self.p = project
         self.log = log
         self.progress = progress
         self.cancelled = cancelled
         self.precision = precision
         self.stress_mode = stress_mode
+        self.mixed_mode = mixed_mode
 
     def texts_for(self, lang: str) -> dict[int, str]:
         phrases = self.p.phrases()
@@ -123,11 +124,8 @@ class Dubber:
                     n = need(d)
                     if n <= 0:
                         continue
-                    from . import stress
-                    mtext = stress.for_model(d.text, lang, self.stress_mode)
                     try:
-                        wavs, sr = tts.generate([mtext] * n, lname, temperature,
-                                                max_seconds=max(6.0, slot * 2.5))
+                        wavs, sr = self._gen(tts, d.text, lang, n, temperature, max(6.0, slot * 2.5))
                     except (FloatingPointError, RuntimeError) as e:
                         if tts.precision == "fp32":
                             raise
@@ -136,8 +134,7 @@ class Dubber:
                         precision = "fp32"
                         tts = get_tts(repo, self.log, "fp32")
                         tts.set_reference(ref_audio, ref_text)
-                        wavs, sr = tts.generate([mtext] * n, lname, temperature,
-                                                max_seconds=max(6.0, slot * 2.5))
+                        wavs, sr = self._gen(tts, d.text, lang, n, temperature, max(6.0, slot * 2.5))
                     new = []
                     for vi, w in enumerate(wavs):
                         w = trim_silence(dsp.resample(w, sr, OUT_SR), OUT_SR)
@@ -176,6 +173,63 @@ class Dubber:
                     continue                      # выбранный вариант остаётся выбранным
                 self.auto_choose(d, phrases[d.id].dur)
         self.p.save()
+
+    def _gen(self, tts, text: str, lang: str, n: int, temperature: float, max_s: float, mixed: str | None = None):
+        """Генерация n вариантов фразы с учётом ударений, словаря произношения и двуязычия."""
+        from . import stress
+        mixed = mixed or self.mixed_mode
+        mtext = stress.for_model(text, lang, self.stress_mode)
+        lname = TTS_LANGS[lang][1]
+        if lang == "ru" and stress.has_latin(mtext) and mixed != "plain":
+            if mixed == "auto":
+                try:
+                    return tts.generate([mtext] * n, "auto", temperature, max_seconds=max_s)
+                except FloatingPointError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"Режим «Авто» не поддержан моделью ({type(e).__name__}) — использую склейку")
+            segs = stress.split_by_script(mtext)
+            if len(segs) > 1 or segs[0][0] == "en":
+                parts, sr = [], 24000
+                for l, t in segs:
+                    ln = "english" if l == "en" else "russian"
+                    w, sr = tts.generate([t] * n, ln, temperature, max_seconds=max(4.0, len(t) * 0.15 + 3))
+                    parts.append([trim_silence(np.asarray(x, np.float32), sr, pad=0.03) for x in w])
+                gap = np.zeros(int(0.07 * sr), np.float32)
+                out = []
+                for i in range(n):
+                    chunks = []
+                    for k, seg in enumerate(parts):
+                        if k:
+                            chunks.append(gap)
+                        chunks.append(seg[i])
+                    out.append(dsp.concat_crossfade(chunks, sr, 0.01))
+                return out, sr
+        return tts.generate([mtext] * n, lname, temperature, max_seconds=max_s)
+
+    def mixed_test(self, text: str, on_item=None) -> list[tuple[str, str]]:
+        """Двуязычная фраза тремя способами — выбрать на слух."""
+        from . import stress, voices
+        voice = voices.get(self.p.voice)
+        ref_audio, ref_text = voices.reference(voice, self.p)
+        tts = get_tts(TTS_LANGS["ru"][0], self.log, self.precision)
+        tts.set_reference(ref_audio, ref_text)
+        d = self.p.folder / "stress_test"
+        d.mkdir(exist_ok=True)
+        out = []
+        for i, mode in enumerate(stress.MIXED_MODES):
+            if self.cancelled():
+                break
+            self.log(f"Двуязычие, способ «{stress.MIXED_NAMES[mode]}»")
+            wavs, sr = self._gen(tts, text, "ru", 1, 0.6, 25.0, mixed=mode)
+            w = trim_silence(dsp.resample(np.asarray(wavs[0], np.float32), sr, OUT_SR), OUT_SR)
+            f = d / f"mixed_{mode}_{int(time.time() * 1000)}.wav"
+            _write(f, w)
+            out.append((mode, str(f)))
+            if on_item:
+                on_item(mode, str(f))
+            self.progress(i + 1, len(stress.MIXED_MODES))
+        return out
 
     def stress_test(self, text: str, lang: str = "ru", on_item=None) -> list[tuple[str, str]]:
         """Одна фраза тремя способами передачи ударения; on_item(mode, path) вызывается по мере готовности."""
@@ -220,7 +274,9 @@ class Dubber:
                     try:
                         hyp = wh.text(x, sr, lang)
                         from . import stress
-                        v.cer = round(cer(stress.strip(d.text), hyp), 3)
+                        c1 = cer(stress.strip(d.text), hyp)
+                        c2 = cer(stress.strip(stress.apply_pron(d.text)), hyp)
+                        v.cer = round(min(c1, c2), 3)
                     except Exception as e:  # noqa: BLE001
                         self.log(f"проверка не удалась: {e}")
         finally:
