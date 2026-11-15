@@ -1143,12 +1143,21 @@ class MainWindow(QMainWindow):
                     st = fit_status(vv, ph.dur)
                     col = {"ok": "#2e7d4f", "stretch": "#a0771a", "long": "#a3242f"}[st]
                     warn = " ⚠" if (vv.cer is not None and vv.cer > 0.25) else ""
-                    b = QToolButton(); b.setText(f"{vi + 1}: {vv.dur:.1f}s{warn}")
+                    vstale = (vv.text or d.text) != (ph.text if src else texts.get(ph.id, "")) or \
+                        (vv.voice or d.voice) != self.p.voice
+                    star = "★ " if vv.pinned else ""
+                    b = QToolButton(); b.setText(f"{star}{vi + 1}: {vv.dur:.1f}s{warn}" + (" ⟲" if vstale else ""))
+                    if vstale:
+                        col = "#555a63"
                     sel = vi == d.chosen
                     b.setStyleSheet(f"QToolButton{{background:{col};color:white;padding:3px 6px;"
                                     f"border:{'2px solid #ffcc33' if sel else '1px solid #333'};"
                                     f"font-weight:{'bold' if sel else 'normal'}}}")
                     tip = T(f"{vv.dur:.2f} с при слоте {ph.dur:.2f} с", f"{vv.dur:.2f}s for a {ph.dur:.2f}s slot")
+                    if vstale:
+                        tip += T("\n⟲ сгенерирован со старым текстом или другим голосом", "\n⟲ made with older text or another voice")
+                    if vv.pinned:
+                        tip += T("\n★ отмечен — не удаляется при перегенерации", "\n★ starred — kept on regeneration")
                     if vv.cer is not None:
                         tip += T(f"\nРасхождение с текстом: {vv.cer * 100:.0f}%", f"\nText mismatch: {vv.cer * 100:.0f}%")
                     b.setToolTip(tip)
@@ -1160,7 +1169,9 @@ class MainWindow(QMainWindow):
                 if d.chosen >= 0:
                     n_chosen += 1
                     n_long += fit_status(d.variants[d.chosen], ph.dur) == "long"
-                stale = d.text != (ph.text if src else texts.get(ph.id, "")) or d.voice != self.p.voice or \
+                cv = d.variants[d.chosen] if 0 <= d.chosen < len(d.variants) else None
+                stale = cv is None or (cv.text or d.text) != (ph.text if src else texts.get(ph.id, "")) or \
+                    (not cv.pinned and (cv.voice or d.voice) != self.p.voice) or \
                     (d.slot > 0 and abs(d.slot - ph.dur) > 0.05)
                 if stale:
                     lbl = QLabel(T("устарело", "outdated")); lbl.setStyleSheet("color:#ffb300"); hl.addWidget(lbl)
@@ -1204,6 +1215,10 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         a4 = m.addAction(T("★ Ориентироваться на этот вариант", "★ Use this take as the voice reference"))
         a5 = m.addAction(T("В набор для дообучения", "Add to the fine-tuning set"))
+        dd = next((x for x in self.p.dub.get(lang, []) if x.id == pid), None)
+        a7 = None
+        if dd and 0 <= k < len(dd.variants) and dd.variants[k].pinned:
+            a7 = m.addAction(T("Снять ★ (можно будет удалить при перегенерации)", "Unstar"))
         a6 = m.addAction(T(f"Открыть папку набора ({voices.dataset_minutes():.1f} мин)",
                            f"Open the set folder ({voices.dataset_minutes():.1f} min)"))
         m.addSeparator()
@@ -1213,6 +1228,9 @@ class MainWindow(QMainWindow):
         if act in (a4, a5) and d and 0 <= k < len(d.variants):
             wav = self.p.dub_dir(lang) / d.variants[k].file
             if act == a4:
+                d.variants[k].pinned = True
+                d.chosen = k
+                self.p.save()
                 self.make_etalon(wav, d, d.variants[k])
             else:
                 mins = voices.add_to_dataset(wav, d.text, lang, d.voice, f"{self.p.name}_{lang}_{pid}_{k + 1}")
@@ -1221,6 +1239,10 @@ class MainWindow(QMainWindow):
             return
         if act == a6:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(voices.dataset_dir())))
+            return
+        if a7 is not None and act == a7:
+            d.variants[k].pinned = False
+            self.p.save(); self.fill_dub_table()
             return
         if act == a1:
             self.run_dub(None, ask=False, replace_variant=(lang, pid, k))
@@ -1250,6 +1272,7 @@ class MainWindow(QMainWindow):
                          T(f"Перегенерировать выделенные фразы ({len(ids)})", f"Regenerate selected phrases ({len(ids)})"))
         a2 = m.addAction(T("Сбросить длительность", "Reset duration"))
         a2.setEnabled(any(i in self.p.dur_override for i in ids))
+        a3 = m.addAction(T("Вернуть удалённые варианты (с диска)", "Recover lost variants (from disk)"))
         if len(ids) == 1:
             m.addSeparator()
             self._stress_items(m, pid)
@@ -1260,6 +1283,11 @@ class MainWindow(QMainWindow):
             for i in ids:
                 self.p.dur_override.pop(i, None)
             self.p.save(); self.fill_dub_table()
+        elif act == a3:
+            n = sum(self.p.recover_variants(lang, i) for i in ids)
+            self.log(T(f"Возвращено вариантов: {n}. Они помечены ⟲ — послушайте и отметьте нужный ★.",
+                       f"Recovered variants: {n}. Marked ⟲ — listen and star the one you need."))
+            self.fill_dub_table()
 
     # ----- эталон -----
     def make_etalon(self, wav: Path, d, v):

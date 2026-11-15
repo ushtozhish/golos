@@ -76,17 +76,20 @@ class Dubber:
             for pid, ph in phrases.items():
                 t = texts.get(pid, "").strip()
                 d = existing.get(pid)
-                if d is None or d.text != t or d.voice != voice.id:
-                    if d is not None and replace_variant and pid == replace_variant[1]:
-                        self.log(f"[{lang}] фраза {pid}: текст или голос изменились — пересоздаю все варианты")
-                        replace_variant = None
+                if d is None:
                     d = DubPhrase(id=pid, text=t, voice=voice.id)
+                for v in d.variants:              # старые проекты: вариант помнит текст и голос фразы
+                    v.text = v.text or d.text
+                    v.voice = v.voice or d.voice
+                want = only_ids is None or pid in only_ids.get(lang, set())
+                if want:
+                    # варианты не удаляются: текст и голос фразы просто обновляются,
+                    # старые варианты будут помечены «устарело»
+                    d.text, d.voice = t, voice.id
                 lst.append(d)
-            self.p.dub[lang] = lst
-            for d in lst:
-                want = only_ids is None or d.id in only_ids.get(lang, set())
-                if d.text and want:
+                if t and want:
                     jobs.append((lang, d))
+            self.p.dub[lang] = lst
         single = replace_variant is not None
         total = 1 if single else len(jobs) * n_variants
         done = 0
@@ -124,20 +127,23 @@ class Dubber:
                         w = trim_silence(dsp.resample(w, sr, OUT_SR), OUT_SR)
                         f = self.p.dub_dir(lang) / f"p{d.id:03d}_v{vi + 1}_{int(time.time() * 1000)}.wav"
                         _write(f, w)
-                        new.append(Variant(file=f.name, dur=len(w) / OUT_SR))
+                        new.append(Variant(file=f.name, dur=len(w) / OUT_SR, text=d.text, voice=voice.id))
                         done += 1
                         self.progress(done, total)
                     if single:
                         k = replace_variant[2]
-                        if 0 <= k < len(d.variants):
+                        if 0 <= k < len(d.variants) and not d.variants[k].pinned:
                             d.variants[k] = new[0]
                         else:
-                            d.variants.append(new[0])
+                            d.variants.append(new[0])     # ★ не трогаем — новый вариант рядом
                         self.log(f"[{lang}] фраза {d.id}: вариант {k + 1} пересоздан")
                     else:
-                        d.variants = new
-                        d.chosen = -1
-                        self.log(f"[{lang}] фраза {d.id}: {len(new)} вар.")
+                        keep = [v for v in d.variants if v.pinned]
+                        chosen_file = d.variants[d.chosen].file if 0 <= d.chosen < len(d.variants) else None
+                        d.variants = keep + new
+                        d.chosen = next((i for i, v in enumerate(d.variants) if v.file == chosen_file), -1)
+                        self.log(f"[{lang}] фраза {d.id}: {len(new)} вар." +
+                                 (f" (+ отмеченных ★: {len(keep)})" if keep else ""))
                     d.slot = round(slot, 3)
                     self.p.save()
             finally:
@@ -204,8 +210,16 @@ class Dubber:
         return c * 4.0 + max(0.0, ratio - 1.0) * 1.5 + abs(ratio - 1.0) * 0.3
 
     def auto_choose(self, d: DubPhrase, slot: float):
-        if d.variants:
-            d.chosen = min(range(len(d.variants)), key=lambda i: self.score(d.variants[i], slot))
+        """Если выбран ★-вариант с актуальным текстом — оставляем его; иначе лучший по проверке и длительности."""
+        if not d.variants:
+            return
+        if 0 <= d.chosen < len(d.variants):
+            v = d.variants[d.chosen]
+            if v.pinned and v.text == d.text:
+                return
+        fresh = [i for i, v in enumerate(d.variants) if v.text == d.text and v.voice == d.voice] or \
+            list(range(len(d.variants)))
+        d.chosen = min(fresh, key=lambda i: self.score(d.variants[i], slot))
 
 
 def fit_status(v: Variant, slot: float) -> str:

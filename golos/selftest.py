@@ -83,6 +83,9 @@ def main():
     f0 = w.p.dub_dir("en") / f"p{ph[0].id}.wav"
     w.make_etalon(f0, w.p.dub["en"][0], w.p.dub["en"][0].variants[0])
     assert w.p.voice.endswith("_etalon"), w.p.voice
+    import shutil as _sh
+    _sh.copy(f0, w.p.dub_dir("en") / f"p{ph[0].id:03d}_v9_123.wav")      # «потерянный» вариант
+    assert w.p.recover_variants("en", ph[0].id) == 1
     mins = voices.add_to_dataset(f0, "Клиент хочет", "en", w.p.voice, "test_1")
     assert mins > 0
     # ударения

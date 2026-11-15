@@ -55,6 +55,9 @@ class Variant:
     dur: float
     cer: float | None = None
     stretched: float = 1.0
+    pinned: bool = False     # ★ отмечен как удачный — не удаляется при перегенерации
+    text: str = ""           # текст, по которому сгенерирован
+    voice: str = ""          # голос, которым сгенерирован
 
 
 @dataclass
@@ -551,6 +554,33 @@ class Project:
                 self.phrase_texts[k + 1] = chunk
         self.save()
         return len(groups)
+
+    def recover_variants(self, lang: str, pid: int) -> int:
+        """Возвращает в список варианты фразы, файлы которых остались в папке dub/<язык>."""
+        import re as _re
+        d = next((x for x in self.dub.get(lang, []) if x.id == pid), None)
+        if d is None:
+            d = DubPhrase(id=pid, text="")
+            self.dub.setdefault(lang, []).append(d)
+            self.dub[lang].sort(key=lambda x: x.id)
+        known = {v.file for v in d.variants}
+        n = 0
+        folder = self.folder / "dub" / lang
+        if not folder.exists():
+            return 0
+        import soundfile as sf
+        for f in sorted(folder.glob(f"p{pid:03d}_v*.wav"), key=lambda q: q.stat().st_mtime):
+            if f.name in known:
+                continue
+            try:
+                dur = sf.info(str(f)).duration
+            except Exception:  # noqa: BLE001
+                continue
+            d.variants.append(Variant(file=f.name, dur=dur, text="(восстановлен)", voice="?"))
+            n += 1
+        if n:
+            self.save()
+        return n
 
     # ---------- образец голоса ----------
     def reference_clip(self, min_s: float = 6.0, max_s: float = 14.0):
