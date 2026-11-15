@@ -65,7 +65,7 @@ class TrainTab(QWidget):
         self.text_lbl = QLabel(); self.text_lbl.setWordWrap(True); self.text_lbl.setAlignment(Qt.AlignCenter)
         f = QFont(self.font()); f.setPointSizeF(22); self.text_lbl.setFont(f)
         self.text_lbl.setMinimumHeight(150)
-        self.text_lbl.setStyleSheet("background:#15171b;border:1px solid #33363d;padding:16px")
+        self.text_lbl.setStyleSheet("background:#15171b;color:#f2f2f2;border:1px solid #33363d;padding:16px")
         rv.addWidget(self.text_lbl)
         self.hint_lbl = QLabel(); self.hint_lbl.setAlignment(Qt.AlignCenter); self.hint_lbl.setStyleSheet("color:#ffcc33")
         rv.addWidget(self.hint_lbl)
