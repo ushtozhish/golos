@@ -335,6 +335,7 @@ class PhraseEditor(QTableWidget):
     Одинарный клик — перейти к фразе на дорожке."""
     seek = Signal(float)
     text_edited = Signal(int, str)      # id фразы, новый текст
+    menu_requested = Signal(int, object)  # id фразы, глобальная позиция
 
     def __init__(self, parent=None):
         super().__init__(0, 3, parent)
@@ -355,6 +356,8 @@ class PhraseEditor(QTableWidget):
         self.phr = []
         self._cur = -1
         self.cellClicked.connect(self._clicked)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
         self.itemChanged.connect(self._changed)
         self.note = QLabel(self)
         self.note.setWordWrap(True)
@@ -400,6 +403,11 @@ class PhraseEditor(QTableWidget):
             self.setItem(r, 2, it)
         self.resizeRowsToContents()
         self.blockSignals(False)
+
+    def _menu(self, pos):
+        it = self.itemAt(pos)
+        if it is not None and 0 <= it.row() < len(self.phr):
+            self.menu_requested.emit(self.phr[it.row()].id, self.viewport().mapToGlobal(pos))
 
     def _clicked(self, r, c):
         if 0 <= r < len(self.phr):

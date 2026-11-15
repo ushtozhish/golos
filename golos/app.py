@@ -21,7 +21,7 @@ from .i18n import T, set_lang
 from .project import Project, Word, SR, new_project_dir
 from .widgets import TimelinePanel, PhraseEditor
 from .workers import Task
-from . import audio_io, bridge, models, voices
+from . import audio_io, bridge, models, voices, stress
 
 ORG = "GolosApp"
 
@@ -79,6 +79,15 @@ class SettingsDialog(QDialog):
         f.addRow(T("Язык начитки", "Recording language"), self.src)
         f.addRow(T("Папка проектов", "Projects folder"), row)
         f.addRow(T("Точность синтеза", "Synthesis precision"), self.prec)
+        self.smode = QComboBox()
+        for m_ in stress.MODES:
+            self.smode.addItem(stress.MODE_NAMES[m_], m_)
+        self.smode.setCurrentIndex(max(0, self.smode.findData(s.value("stress_mode", "acute"))))
+        sd = QPushButton(T("Открыть словарь ударений", "Open stress dictionary"))
+        sd.clicked.connect(lambda: (stress.dict_path().exists() or stress.dict_path().write_text("{}", "utf-8"),
+                                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(stress.dict_path())))))
+        f.addRow(T("Ударение для модели", "Stress for the model"), self.smode)
+        f.addRow("", sd)
         f.addRow(QLabel(T("Видеокарта: ", "GPU: ") + models.torch_info()))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
@@ -93,7 +102,7 @@ class SettingsDialog(QDialog):
         old = self.s.value("ui_lang", "ru")
         for k, v in [("ui_lang", self.ui_lang.currentData()), ("mic", self.mic.currentData()),
                      ("source_lang", self.src.currentData()), ("root", self.root.text()),
-                     ("precision", self.prec.currentData())]:
+                     ("precision", self.prec.currentData()), ("stress_mode", self.smode.currentData())]:
             self.s.setValue(k, v)
         if old != self.ui_lang.currentData():
             QMessageBox.information(self, APP_NAME, T("Язык интерфейса сменится после перезапуска.",
@@ -316,6 +325,7 @@ class MainWindow(QMainWindow):
         bottom = QWidget(); bl = QHBoxLayout(bottom); bl.setContentsMargins(0, 0, 0, 0)
         self.text = PhraseEditor(); self.text.seek.connect(self.on_seek)
         self.text.text_edited.connect(self.on_phrase_edited)
+        self.text.menu_requested.connect(lambda pid, gpos: self.phrase_menu(pid, gpos))
         bl.addWidget(self.text, 3)
 
         side = QVBoxLayout()
@@ -922,6 +932,9 @@ class MainWindow(QMainWindow):
             return
         orig = {ph.id: ph.text for ph in self.p.phrases()}
         self.p.phrase_texts[pid] = text
+        for w in stress.words_of(text):
+            if "+" in w:
+                stress.save_word(w)
         self.p.save()
         if orig.get(pid) != text:
             self.log(T(f"Фраза {pid} исправлена", f"Phrase {pid} edited"))
@@ -999,7 +1012,7 @@ class MainWindow(QMainWindow):
         for vc in voices.list_voices():
             label = T(vc.name, "My voice (from recording)") if vc.kind == "me" else vc.name
             kind = {"me": "", "design": T(" · по описанию", " · designed"), "preset": T(" · диктор", " · preset"),
-                    "file": T(" · из файла", " · from file")}[vc.kind]
+                    "file": T(" · из файла", " · from file"), "etalon": " ★"}.get(vc.kind, "")
             self.voice_box.addItem(label + kind, vc.id)
         self.voice_box.setCurrentIndex(max(0, self.voice_box.findData(cur)))
         self.voice_box.blockSignals(False)
@@ -1173,6 +1186,9 @@ class MainWindow(QMainWindow):
                 self.log(T("Длительность: введите число секунд, например 3.5", "Duration: enter seconds, e.g. 3.5"))
         elif item.column() == 2:
             self.p.phrase_texts[pid] = item.text().strip()
+            for w in stress.words_of(item.text()):
+                if "+" in w:
+                    stress.save_word(w)
         elif item.column() == 3 and lang != self.p.source_lang:
             self.p.translations.setdefault(lang, {})[pid] = item.text().strip()
         else:
@@ -1186,8 +1202,26 @@ class MainWindow(QMainWindow):
         a1 = m.addAction(T(f"Перегенерировать вариант {k + 1}", f"Regenerate variant {k + 1}"))
         a2 = m.addAction(T("Перегенерировать всю фразу", "Regenerate the whole phrase"))
         m.addSeparator()
+        a4 = m.addAction(T("★ Ориентироваться на этот вариант", "★ Use this take as the voice reference"))
+        a5 = m.addAction(T("В набор для дообучения", "Add to the fine-tuning set"))
+        a6 = m.addAction(T(f"Открыть папку набора ({voices.dataset_minutes():.1f} мин)",
+                           f"Open the set folder ({voices.dataset_minutes():.1f} min)"))
+        m.addSeparator()
         a3 = m.addAction(T(f"Удалить вариант {k + 1}", f"Delete variant {k + 1}"))
         act = m.exec(btn.mapToGlobal(pos))
+        d = next((x for x in self.p.dub.get(lang, []) if x.id == pid), None)
+        if act in (a4, a5) and d and 0 <= k < len(d.variants):
+            wav = self.p.dub_dir(lang) / d.variants[k].file
+            if act == a4:
+                self.make_etalon(wav, d, d.variants[k])
+            else:
+                mins = voices.add_to_dataset(wav, d.text, lang, d.voice, f"{self.p.name}_{lang}_{pid}_{k + 1}")
+                self.log(T(f"Добавлено в набор для дообучения. Всего: {mins:.1f} мин (для дообучения нужно ~30–60).",
+                           f"Added to the fine-tuning set. Total: {mins:.1f} min (~30–60 needed)."))
+            return
+        if act == a6:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(voices.dataset_dir())))
+            return
         if act == a1:
             self.run_dub(None, ask=False, replace_variant=(lang, pid, k))
         elif act == a2:
@@ -1216,6 +1250,9 @@ class MainWindow(QMainWindow):
                          T(f"Перегенерировать выделенные фразы ({len(ids)})", f"Regenerate selected phrases ({len(ids)})"))
         a2 = m.addAction(T("Сбросить длительность", "Reset duration"))
         a2.setEnabled(any(i in self.p.dur_override for i in ids))
+        if len(ids) == 1:
+            m.addSeparator()
+            self._stress_items(m, pid)
         act = m.exec(self.table.viewport().mapToGlobal(pos))
         if act == a1:
             self.run_dub({lang: ids}, ask=False)
@@ -1223,6 +1260,116 @@ class MainWindow(QMainWindow):
             for i in ids:
                 self.p.dur_override.pop(i, None)
             self.p.save(); self.fill_dub_table()
+
+    # ----- эталон -----
+    def make_etalon(self, wav: Path, d, v):
+        import soundfile as sf
+        if v.cer is not None and v.cer > 0.15:
+            if QMessageBox.question(self, APP_NAME, T(
+                    f"В этом варианте модель отклонилась от текста ({v.cer * 100:.0f}%). "
+                    "Образец с ошибками ухудшит следующие фразы. Всё равно взять?",
+                    f"This take deviates from the text ({v.cer * 100:.0f}%). Use it anyway?")) != QMessageBox.Yes:
+                return
+        x, sr = sf.read(str(wav), dtype="float32")
+        base = voices.get(self.p.voice)
+        try:
+            vc = voices.add_to_etalon(base, x, sr, d.text, self.p)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, str(e)); return
+        self.p.voice = vc.id; self.p.save()
+        self.s.setValue("voice", vc.id)
+        self.reload_voices()
+        self.log(T(f"★ Голос «{vc.name}»: образец теперь из отмеченных вариантов. Перегенерируйте фразы — "
+                   f"они будут ориентироваться на эту подачу.",
+                   f"★ Voice «{vc.name}» now uses the starred takes as reference. Regenerate phrases."))
+        self.fill_dub_table()
+
+    # ----- ударения -----
+    def phrase_menu(self, pid: int, gpos):
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        self._stress_items(m, pid)
+        if m.actions():
+            m.exec(gpos)
+
+    def _stress_items(self, m, pid: int):
+        if not self.p or self.p.source_lang != "ru":
+            return
+        ph = next((x for x in self.p.phrases() if x.id == pid), None)
+        if not ph:
+            return
+        sub = m.addMenu(T("Ударение в слове", "Stress in word"))
+        for i, w in enumerate(stress.words_of(ph.text)):
+            if stress.vowel_count(stress.strip(w)) >= 2 and "+" not in w:
+                a = sub.addAction(w)
+                a.triggered.connect(lambda _=False, pid=pid, i=i: self.add_stress(pid, i))
+        if not sub.actions():
+            sub.setEnabled(False)
+        a = m.addAction(T("Убрать ударения из фразы", "Remove stress marks"))
+        a.setEnabled("+" in ph.text)
+        a.triggered.connect(lambda: self._set_phrase_text(pid, stress.strip(ph.text)))
+        a = m.addAction(T("Проверить ударение на слух (3 способа)…", "Test stress by ear (3 ways)…"))
+        a.setEnabled("+" in stress.apply_dict(ph.text))
+        a.triggered.connect(lambda: self.test_stress(pid))
+
+    def _set_phrase_text(self, pid: int, text: str):
+        self.p.phrase_texts[pid] = text
+        for w in stress.words_of(text):
+            if "+" in w:
+                stress.save_word(w)
+        self.p.save(); self.text.rebuild(); self.fill_dub_table()
+
+    def add_stress(self, pid: int, i: int):
+        ph = next((x for x in self.p.phrases() if x.id == pid), None)
+        if not ph:
+            return
+        text = ph.text
+
+        def job(task: Task):
+            return stress.auto_stress_word(text, i, task.log.emit)
+
+        def done(res):
+            if not res:
+                self.log(T("Ударение не определилось — поставьте вручную: двойной клик по фразе и «+» перед ударной гласной.",
+                           "Could not place stress — add «+» before the stressed vowel manually."))
+                return
+            self._set_phrase_text(pid, res)
+            w = stress.words_of(res)[i]
+            self.log(T(f"Ударение: {w} (если неверно — двойной клик по фразе и поправьте «+»)",
+                       f"Stress: {w} (if wrong, double-click the phrase and move «+»)"))
+
+        self.start_task(job, done)
+
+    def test_stress(self, pid: int):
+        ph = next((x for x in self.p.phrases() if x.id == pid), None)
+        if not ph:
+            return
+        from .dub import Dubber
+        p, prec, text = self.p, self.s.value("precision", "fp16"), ph.text
+
+        def job(task: Task):
+            return Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec).stress_test(text)
+
+        def done(res):
+            import soundfile as sf
+            dlg = QDialog(self); dlg.setWindowTitle(T("Какой способ ударения сработал?", "Which stress method worked?"))
+            v = QVBoxLayout(dlg)
+            v.addWidget(QLabel(T("Послушайте и выберите вариант с правильным ударением — "
+                                 "этот способ будет использоваться дальше.",
+                                 "Listen and pick the take with correct stress — this method will be used from now on.")))
+            cur = self.s.value("stress_mode", "acute")
+            for mode, f in res:
+                row = QHBoxLayout()
+                pb = QPushButton("▶ " + stress.MODE_NAMES[mode] + ("  (сейчас)" if mode == cur else ""))
+                pb.clicked.connect(lambda _=False, f=f: self.player.play(*sf.read(f, dtype="float32")))
+                cb = QPushButton(T("Выбрать", "Choose"))
+                cb.clicked.connect(lambda _=False, mode=mode: (self.s.setValue("stress_mode", mode), dlg.accept(),
+                                                               self.log(T("Способ ударения: ", "Stress method: ") +
+                                                                        stress.MODE_NAMES[mode])))
+                row.addWidget(pb, 1); row.addWidget(cb); v.addLayout(row)
+            dlg.exec()
+
+        self.start_task(job, done)
 
     def pick_variant(self, lang: str, pid: int, k: int):
         d = next((x for x in self.p.dub.get(lang, []) if x.id == pid), None)
@@ -1260,9 +1407,10 @@ class MainWindow(QMainWindow):
         from .dub import Dubber
         p, nv, ver, temp = self.p, self.sp_var.value(), self.cb_verify.isChecked(), self.sp_temp.value()
         prec = self.s.value("precision", "fp16")
+        smode = self.s.value("stress_mode", "acute")
 
         def job(task: Task):
-            Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec).run(
+            Dubber(p, task.log.emit, lambda a, b: task.progress.emit(a, b), task.is_cancelled, prec, smode).run(
                 langs, nv, ver, only_ids, temp, replace_variant)
 
         def done(_):

@@ -79,6 +79,18 @@ def main():
     for i in range(30):
         w.log(f"проверка прокрутки {i}")
     sb = w.logbox.verticalScrollBar(); assert sb.value() == sb.maximum()
+    # эталон и набор для дообучения
+    f0 = w.p.dub_dir("en") / f"p{ph[0].id}.wav"
+    w.make_etalon(f0, w.p.dub["en"][0], w.p.dub["en"][0].variants[0])
+    assert w.p.voice.endswith("_etalon"), w.p.voice
+    mins = voices.add_to_dataset(f0, "Клиент хочет", "en", w.p.voice, "test_1")
+    assert mins > 0
+    # ударения
+    from golos import stress
+    assert stress.for_model("зам+ок", "ru", "caps") == "замОк"
+    w._set_phrase_text(1, "Клиент хочет видеть гр+ейд.")
+    assert stress.load_dict().get("грейд") == "гр+ейд"
+    w.refresh_dub_view(); app.processEvents()
     w.grab().save(str(tmp / "dub.png"))
     z = exporter.export_package(w.p, ["en"], w.log)
     assert z.exists()
@@ -109,7 +121,7 @@ def main():
     w.close()
     # модули синтеза должны импортироваться (ловим несовместимые версии torch/torchaudio)
     import importlib
-    for m in ("torch", "torchaudio", "transformers", "librosa", "noisereduce", "pyloudnorm", "qwen_tts"):
+    for m in ("torch", "torchaudio", "transformers", "librosa", "noisereduce", "pyloudnorm", "qwen_tts", "ruaccent"):
         mod = importlib.import_module(m)
         print("import ok:", m, getattr(mod, "__version__", ""))
     from golos import models  # noqa: F401

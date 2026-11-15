@@ -15,7 +15,7 @@ def build_request(phrases, langs: list[str], source_lang: str = "ru", context: s
     """phrases: список Phrase (id, text, dur)."""
     names = ", ".join(f"{l} ({LANG_NAMES_RU.get(l, l)})" for l in langs)
     data = {"source": source_lang,
-            "phrases": [{"id": p.id, "dur": round(p.dur, 2), "text": p.text} for p in phrases]}
+            "phrases": [{"id": p.id, "dur": round(p.dur, 2), "text": p.text.replace("+", "")} for p in phrases]}
     lines = [
         f"[{MARK}]",
         f"Переведи текст диктора на: {names}.",

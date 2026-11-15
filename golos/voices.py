@@ -32,7 +32,7 @@ SAMPLE_TEXT = {
 class Voice:
     id: str
     name: str
-    kind: str              # me | file | design | preset
+    kind: str              # me | file | design | preset | etalon
     text: str = ""         # текст образца
     description: str = ""  # для design
     speaker: str = ""      # для preset
@@ -104,3 +104,85 @@ def reference(v: Voice, project=None) -> tuple[np.ndarray, str]:
     import soundfile as sf
     x, sr = sf.read(str(v.wav), dtype="float32")
     return dsp.resample(dsp.to_mono(x), sr, 24000), v.text
+
+
+def add_to_etalon(base: Voice, clip: np.ndarray, sr: int, text: str, project=None,
+                  max_seconds: float = 15.0) -> Voice:
+    """«★ Ориентироваться на этот вариант»: добавляет удачный вариант в образец голоса-эталона.
+    Эталон — отдельный голос «<имя> — эталон»; образец = до 3 отмеченных вариантов (≤ 15 с).
+    Если получается короче 4 с, в начало добавляется исходный образец голоса."""
+    import json as _json
+    import soundfile as sf
+    from . import stress
+    clip = dsp.resample(dsp.to_mono(clip), sr, 24000)
+    text = stress.strip(text).strip()
+    eid = base.id[:-7] if base.id.endswith("_etalon") else base.id
+    root = base if not base.id.endswith("_etalon") else get(eid)
+    et_id = f"{eid}_etalon"
+    d = voices_dir() / et_id
+    parts_file = d / "parts.json"
+    parts = []
+    if parts_file.exists():
+        parts = _json.loads(parts_file.read_text("utf-8"))
+    d.mkdir(parents=True, exist_ok=True)
+    pf = d / f"part_{int(time.time() * 1000)}.wav"
+    sf.write(str(pf), clip, 24000, subtype="PCM_16")
+    parts.append({"file": pf.name, "text": text})
+    # не больше max_seconds: выкидываем самые старые
+    def total(ps):
+        return sum(sf.info(str(d / q["file"])).duration for q in ps) + 0.3 * max(0, len(ps) - 1)
+    while len(parts) > 1 and (len(parts) > 3 or total(parts) > max_seconds):
+        parts.pop(0)
+    parts_file.write_text(_json.dumps(parts, ensure_ascii=False, indent=1), "utf-8")
+    gap = np.zeros(int(0.3 * 24000), np.float32)
+    audio, texts = [], []
+    if total(parts) < 4.0:
+        try:
+            x, t = reference(root, project)
+            audio += [x, gap]; texts.append(t)
+        except Exception:  # noqa: BLE001
+            pass
+    for q in parts:
+        x, _ = sf.read(str(d / q["file"]), dtype="float32")
+        audio += [x, gap]; texts.append(q["text"])
+    ref = np.concatenate(audio[:-1]) if audio else clip
+    name = f"{root.name if root.kind != 'me' else 'Мой голос'} — эталон"
+    v = Voice(id=et_id, name=name, kind="etalon", text=" ".join(texts),
+              created=time.strftime("%Y-%m-%d %H:%M"))
+    x = dsp.normalize_loudness(ref, 24000, -18.0)
+    sf.write(str(d / "ref.wav"), x, 24000, subtype="PCM_16")
+    (d / "voice.json").write_text(_json.dumps(asdict(v), ensure_ascii=False, indent=1), "utf-8")
+    return v
+
+
+# ---------------- набор для дообучения ----------------
+def dataset_dir() -> Path:
+    d = Path(os.environ.get("APPDATA", Path.home())) / "Golos" / "dataset"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def add_to_dataset(wav: Path, text: str, lang: str, voice_id: str, tag: str) -> float:
+    """Кладёт пару «звук + текст» в набор для дообучения. Возвращает накопленные минуты."""
+    import shutil
+    from . import stress
+    ld = dataset_dir() / lang
+    ld.mkdir(parents=True, exist_ok=True)
+    name = re.sub(r"[^\w-]+", "_", tag, flags=re.UNICODE)[:60] + ".wav"
+    shutil.copy(str(wav), str(ld / name))
+    meta = dataset_dir() / "metadata.csv"
+    line = f"{lang}/{name}|{stress.strip(text).replace('|', ' ')}|{lang}|{voice_id}\n"
+    with open(meta, "a", encoding="utf-8") as f:
+        f.write(line)
+    return dataset_minutes()
+
+
+def dataset_minutes() -> float:
+    import soundfile as sf
+    total = 0.0
+    for f in dataset_dir().rglob("*.wav"):
+        try:
+            total += sf.info(str(f)).duration
+        except Exception:  # noqa: BLE001
+            pass
+    return total / 60

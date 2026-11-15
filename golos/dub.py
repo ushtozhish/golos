@@ -39,12 +39,13 @@ class Dubber:
     def __init__(self, project: Project, log: Callable[[str], None],
                  progress: Callable[[int, int], None] = lambda a, b: None,
                  cancelled: Callable[[], bool] = lambda: False,
-                 precision: str = "fp16"):
+                 precision: str = "fp16", stress_mode: str = "acute"):
         self.p = project
         self.log = log
         self.progress = progress
         self.cancelled = cancelled
         self.precision = precision
+        self.stress_mode = stress_mode
 
     def texts_for(self, lang: str) -> dict[int, str]:
         phrases = self.p.phrases()
@@ -103,8 +104,10 @@ class Dubber:
                     slot = phrases[d.id].dur
                     lname = TTS_LANGS[lang][1]
                     n = 1 if single else n_variants
+                    from . import stress
+                    mtext = stress.for_model(d.text, lang, self.stress_mode)
                     try:
-                        wavs, sr = tts.generate([d.text] * n, lname, temperature,
+                        wavs, sr = tts.generate([mtext] * n, lname, temperature,
                                                 max_seconds=max(6.0, slot * 2.5))
                     except (FloatingPointError, RuntimeError) as e:
                         if tts.precision == "fp32":
@@ -114,7 +117,7 @@ class Dubber:
                         precision = "fp32"
                         tts = TTS(repo, self.log, "fp32")
                         tts.set_reference(ref_audio, ref_text)
-                        wavs, sr = tts.generate([d.text] * n, lname, temperature,
+                        wavs, sr = tts.generate([mtext] * n, lname, temperature,
                                                 max_seconds=max(6.0, slot * 2.5))
                     new = []
                     for vi, w in enumerate(wavs):
@@ -147,6 +150,31 @@ class Dubber:
                 self.auto_choose(d, phrases[d.id].dur)
         self.p.save()
 
+    def stress_test(self, text: str, lang: str = "ru") -> list[tuple[str, str]]:
+        """Одна фраза тремя способами передачи ударения — чтобы выбрать на слух, какой понимает модель."""
+        from . import stress, voices
+        voice = voices.get(self.p.voice)
+        ref_audio, ref_text = voices.reference(voice, self.p)
+        repo, lname, _ = TTS_LANGS[lang]
+        tts = TTS(repo, self.log, self.precision)
+        out = []
+        try:
+            tts.set_reference(ref_audio, ref_text)
+            d = self.p.folder / "stress_test"
+            d.mkdir(exist_ok=True)
+            for i, mode in enumerate(stress.MODES):
+                mtext = stress.for_model(text, lang, mode)
+                self.log(f"Ударение, способ «{stress.MODE_NAMES[mode]}»: {mtext}")
+                wavs, sr = tts.generate([mtext], lname, 0.6, max_seconds=20)
+                w = trim_silence(dsp.resample(wavs[0], sr, OUT_SR), OUT_SR)
+                f = d / f"{mode}_{int(time.time() * 1000)}.wav"
+                _write(f, w)
+                out.append((mode, str(f)))
+                self.progress(i + 1, len(stress.MODES))
+        finally:
+            tts.close()
+        return out
+
     def verify(self, jobs, only_variants: set[int] | None = None):
         self.log("Проверяю варианты распознаванием (ищу пропуски и «галлюцинации»)…")
         wh = Whisper(self.log)
@@ -161,7 +189,8 @@ class Dubber:
                     x, sr = sf.read(str(self.p.dub_dir(lang) / v.file), dtype="float32")
                     try:
                         hyp = wh.text(x, sr, lang)
-                        v.cer = round(cer(d.text, hyp), 3)
+                        from . import stress
+                        v.cer = round(cer(stress.strip(d.text), hyp), 3)
                     except Exception as e:  # noqa: BLE001
                         self.log(f"проверка не удалась: {e}")
         finally:

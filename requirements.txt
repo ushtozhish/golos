@@ -2,6 +2,7 @@
 torch
 torchaudio
 qwen-tts
+ruaccent
 transformers
 accelerate
 huggingface_hub
