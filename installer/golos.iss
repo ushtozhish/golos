@@ -35,12 +35,14 @@ Source: "..\golos\icon.ico"; DestDir: "{app}\golos"; Flags: ignoreversion
 Source: "..\golos\trainscript.txt"; DestDir: "{app}\golos"; Flags: ignoreversion
 Source: "..\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "setup_env.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "golos-cli.cmd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uv.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "python\*"; DestDir: "{app}\python"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Golos"; Filename: "{app}\python\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; IconFilename: "{app}\golos\icon.ico"
 Name: "{group}\Golos — обновить компоненты"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup_env.ps1"""; WorkingDir: "{app}"
+Name: "{group}\Golos — проверка английского диктора"; Filename: "{cmd}"; Parameters: "/k ""{app}\golos-cli.cmd"" test-en"; WorkingDir: "{app}"; IconFilename: "{app}\golos\icon.ico"
 Name: "{group}\{cm:UninstallProgram,Golos}"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\Golos"; Filename: "{app}\python\pythonw.exe"; Parameters: "-m golos"; WorkingDir: "{app}"; IconFilename: "{app}\golos\icon.ico"; Tasks: desktopicon
 
