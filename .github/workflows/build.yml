@@ -52,6 +52,23 @@ jobs:
           if ($out -match "SELFTEST OK" -and $out -match "Qwen3TTSModel") { exit 0 }
           exit 1
 
+      - name: CLI self-test (без моделей)
+        shell: pwsh
+        run: |
+          $py = "$env:RUNNER_TEMP\ci-python\python.exe"
+          $env:PYTHONUTF8 = "1"
+          $env:APPDATA = "$env:RUNNER_TEMP\appdata"
+          '{"lang":"en","voice":"dry","segments":[{"id":"s1","text":"In 2008, about 99% of $10T moved."},{"id":"s2","text":"Nvidia and TSMC grew in the 1990s."}]}' | Set-Content -Encoding utf8 job.json
+          & $py -m golos.cli synth --job job.json --out cli_out --dry-run
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $r = Get-Content cli_out\result.json -Raw | ConvertFrom-Json
+          if ($r.ok -ne 2) { Write-Host (Get-Content cli_out\result.json -Raw); exit 1 }
+          $m = Get-Content cli_out\s1.json -Raw | ConvertFrom-Json
+          Write-Host "spoken: $($m.spoken_text)"
+          if ($m.words.Count -ne 7) { exit 1 }
+          if (-not (Test-Path cli_out\s1.wav)) { exit 1 }
+          Write-Host "CLI OK"
+
       - name: Publish screenshots to ci-shots branch
         if: always()
         shell: pwsh
