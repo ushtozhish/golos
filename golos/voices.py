@@ -20,11 +20,13 @@ import numpy as np
 
 from . import dsp
 
+# Образец задаёт не только тембр, но и манеру: клон повторяет интонацию образца.
+# Поэтому текст нейтральный, без восклицаний и «живой интонации» (иначе голос становится игривым).
 SAMPLE_TEXT = {
-    "ru": "Добрый день! Это образец голоса. Сейчас я спокойно и чётко прочитаю небольшой текст, "
-          "с естественными паузами и живой интонацией.",
-    "en": "Hello! This is a voice sample. I am going to read a short text calmly and clearly, "
-          "with natural pauses and a lively intonation.",
+    "ru": "Это образец голоса. Я спокойно и чётко прочитаю небольшой текст, "
+          "с естественными паузами, ровно и уверенно.",
+    "en": "In the winter of two thousand eight, a single decision changed the course of an entire industry. "
+          "Few people noticed it at the time.",
 }
 
 

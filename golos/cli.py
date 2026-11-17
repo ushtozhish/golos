@@ -494,6 +494,7 @@ def main(argv=None):
     mv.add_argument("--design", help="описание голоса по-английски")
     mv.add_argument("--style", default="")
     mv.add_argument("--lang", default="en")
+    mv.add_argument("--sample-text", default="", help="фраза образца — задаёт манеру голоса (серьёзная/весёлая)")
     t = sub.add_parser("test-en")
     t.add_argument("--voice")
     t.add_argument("--dry-run", action="store_true")
@@ -517,7 +518,7 @@ def main(argv=None):
             raise SystemExit("Укажите --preset ДИКТОР или --design \"описание\"")
         log = lambda m: emit("log", message=m)  # noqa: E731
         lname = models.TTS_LANGS[a.lang][1]
-        sample = voices.SAMPLE_TEXT.get(a.lang, voices.SAMPLE_TEXT["en"])
+        sample = a.sample_text.strip() or voices.SAMPLE_TEXT.get(a.lang, voices.SAMPLE_TEXT["en"])
         repo = models.TTS_PRESET_ID if a.preset else models.TTS_DESIGN_ID
         m = models.TTS(repo, log)
         try:
