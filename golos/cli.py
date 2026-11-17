@@ -472,6 +472,7 @@ def test_en(voice: str | None, dry_run: bool = False):
 
 # ============================================================ main
 def main(argv=None):
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     for stream in (sys.stdout, sys.stderr):
@@ -487,6 +488,12 @@ def main(argv=None):
     s.add_argument("--job", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--dry-run", action="store_true", help="без моделей: проверка формата (тон вместо голоса)")
+    mv = sub.add_parser("make-voice", help="создать голос без окна: готовый диктор Qwen или по описанию")
+    mv.add_argument("--name", required=True)
+    mv.add_argument("--preset", help="диктор Qwen, например Ryan")
+    mv.add_argument("--design", help="описание голоса по-английски")
+    mv.add_argument("--style", default="")
+    mv.add_argument("--lang", default="en")
     t = sub.add_parser("test-en")
     t.add_argument("--voice")
     t.add_argument("--dry-run", action="store_true")
@@ -504,6 +511,25 @@ def main(argv=None):
         job = json.loads(Path(a.job).read_text("utf-8-sig"))
         s = run_job(job, Path(a.out), dry_run=a.dry_run)
         sys.exit(0 if s["errors"] == 0 else 3)
+    elif a.cmd == "make-voice":
+        from . import models, voices
+        if not (a.preset or a.design):
+            raise SystemExit("Укажите --preset ДИКТОР или --design \"описание\"")
+        log = lambda m: emit("log", message=m)  # noqa: E731
+        lname = models.TTS_LANGS[a.lang][1]
+        sample = voices.SAMPLE_TEXT.get(a.lang, voices.SAMPLE_TEXT["en"])
+        repo = models.TTS_PRESET_ID if a.preset else models.TTS_DESIGN_ID
+        m = models.TTS(repo, log)
+        try:
+            if a.preset:
+                x, sr = m.preset(sample, lname, a.preset, a.style)
+                v = voices.save_voice(a.name, "preset", x, sr, sample, speaker=a.preset)
+            else:
+                x, sr = m.design(sample, lname, a.design)
+                v = voices.save_voice(a.name, "design", x, sr, sample, description=a.design)
+        finally:
+            m.close()
+        emit("voice_created", id=v.id, name=v.name)
     elif a.cmd == "test-en":
         try:
             test_en(a.voice, dry_run=a.dry_run)
