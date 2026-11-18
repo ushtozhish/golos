@@ -178,6 +178,21 @@ def norm_words(s: str) -> list[str]:
     return res
 
 
+def join_heard(chunks: list[str]) -> str:
+    """Склейка слов Whisper в текст. Слова приходят кусками («1» «.4», «99» «%», «$» «300»),
+    поэтому склеиваем с исходными пробелами и чиним разорванные числа."""
+    if any(c[:1].isspace() for c in chunks if c):
+        s = "".join(chunks)
+    else:
+        s = " ".join(chunks)
+    s = re.sub(r"(\d)(?:\s+\.|\.\s+)(\d)", r"\1.\2", s)  # «1» «.4» / «1.» «4» → 1.4
+    s = re.sub(r"(\d)\s+%", r"\1%", s)
+    s = re.sub(r"([$€£])\s+(\d)", r"\1\2", s)
+    s = re.sub(r"(?<!\S)%(?!\S)", " percent ", s)
+    s = re.sub(r"\bper cent\b", "percent", s, flags=re.I)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def cer(ref_words: list[str], hyp_words: list[str]) -> float:
     a, b = "".join(ref_words), "".join(hyp_words)
     if not a:
@@ -352,7 +367,7 @@ def synth_segment(eng: Engine, seg: dict, job: dict, out_dir: Path) -> dict:
             if len(x) < int(0.2 * OUT_SR):
                 continue
             ww = eng.words(x, compare_text)
-            hyp = norm_words(" ".join(t for t, _, _ in ww))
+            hyp = norm_words(join_heard([t for t, _, _ in ww]))
             c = cer(ref_words, hyp)
             dur = len(x) / OUT_SR
             # при равной точности — без затянутых пауз (короче)

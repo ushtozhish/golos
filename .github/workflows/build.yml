@@ -67,6 +67,8 @@ jobs:
           Write-Host "spoken: $($m.spoken_text)"
           if ($m.words.Count -ne 7) { exit 1 }
           if (-not (Test-Path cli_out\s1.wav)) { exit 1 }
+          & $py -c "from golos.cli import join_heard as j, norm_words as n; assert n(j([' about',' 99','%'])) == ['about','ninety','nine','percent']; assert n(j([' 1','.4',' million'])) == ['one','point','four','million']; assert n(j(['3.','5','times'])) == ['three','point','five','times']; print('join_heard OK')"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "CLI OK"
 
       - name: Publish screenshots to ci-shots branch
